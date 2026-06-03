@@ -117,6 +117,7 @@ message OperationLimit {
 //   10004 = 偷菜
 //   10005 = 放虫
 //   10006 = 放草
+//   10015 = 放置社交道具
 
 // ============ 请求/回复消息 ============
 
@@ -277,6 +278,26 @@ message CheckCanOperateRequest {
 message CheckCanOperateReply {
     bool can_operate = 1;
     int64 can_steal_num = 2;
+}
+
+// --- 放置社交道具 (如友谊果实) ---
+message PutSocialItemRequest {
+    int64 host_gid = 1;       // 好友农场GID
+    int64 land_id = 2;        // 目标土地ID (单个)
+    int64 item_id = 3;        // 社交道具ID (如 301101=友谊果实)
+}
+
+message ItemChange {
+    int64 land_id = 1;
+    int64 item_id = 2;
+    int64 count = 3;
+}
+
+message PutSocialItemReply {
+    LandInfo land = 1;                        // 操作后的土地信息
+    OperationLimit operation_limit = 2;       // 操作限制 (id=10015)
+    repeated ItemChange rewards = 3;          // 奖励 (经验等)
+    repeated ItemChange consumed = 4;         // 消耗的道具
 }
 
 // ============ 服务器推送通知 ============

@@ -251,6 +251,9 @@ async function findBestSeed(overrideStrategy?: string): Promise<any | null> {
         const boughtNum = toNum(goods.bought_num);
         if (limitCount > 0 && boughtNum >= limitCount) continue;
 
+        const price = toNum(goods.price);
+        if (!price || price <= 0) continue;
+
         available.push({
             goods,
             goodsId: toNum(goods.id),
@@ -278,15 +281,39 @@ async function findBestSeed(overrideStrategy?: string): Promise<any | null> {
         try {
             const rankings = getPlantRankings(analyticsSortBy);
             const availableBySeedId = new Map<number, any>(available.map((a: any) => [a.seedId, a]));
+            const tried: number[] = [];
             for (const row of rankings) {
                 const seedId = Number(row && row.seedId) || 0;
                 if (seedId <= 0) continue;
                 const lv = Number(row && row.level);
                 if (Number.isFinite(lv) && lv > state.level) continue;
                 const found = availableBySeedId.get(seedId);
-                if (found) return found;
+                if (found) {
+                    if (tried.length > 0) {
+                        log('商店', `策略 ${strategy} 排名第1的作物不可用，已跳过 ${tried.length} 个备选`, {
+                            module: 'farm', event: '选择种子', result: 'fallback_rank', strategy, skipped: tried
+                        });
+                    }
+                    return found;
+                }
+                tried.push(seedId);
             }
-            logWarn('商店', `策略 ${strategy} 未找到可购买作物，回退最高等级`);
+            // 回退：按策略排名排序可购买列表，而不是无脑选最高等级
+            const rankingBySeedId = new Map<number, number>();
+            rankings.forEach((row: any, index: number) => {
+                const sid = Number(row && row.seedId) || 0;
+                if (sid > 0) rankingBySeedId.set(sid, index);
+            });
+            available.sort((a: any, b: any) => {
+                const aRank = rankingBySeedId.has(a.seedId) ? rankingBySeedId.get(a.seedId)! : Number.MAX_SAFE_INTEGER;
+                const bRank = rankingBySeedId.has(b.seedId) ? rankingBySeedId.get(b.seedId)! : Number.MAX_SAFE_INTEGER;
+                if (aRank !== bRank) return aRank - bRank;
+                return b.requiredLevel - a.requiredLevel;
+            });
+            log('商店', `策略 ${strategy} 排名内无可购买作物（共尝试 ${tried.length} 个），按策略排名回退`, {
+                module: 'farm', event: '选择种子', result: 'fallback_strategy', strategy
+            });
+            return available[0];
         } catch (e: any) {
             logWarn('商店', `策略 ${strategy} 计算失败: ${e.message}，回退最高等级`);
         }

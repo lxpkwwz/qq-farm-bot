@@ -5,7 +5,7 @@ export {};
 const { parentPort, workerData } = require('node:worker_threads');
 
 const { CONFIG } = require('../config/config');
-const { getLevelExpProgress } = require('../config/gameConfig');
+const { getLevelExpProgress, loadConfigs } = require('../config/gameConfig');
 const { getAutomation, getPreferredSeed, getConfigSnapshot, applyConfigSnapshot, getFertilizerBuyType, getFertilizerBuyCount } = require('../models/store');
 const { checkAndClaimEmails } = require('../services/email');
 const { getEmailDailyState } = require('../services/email');
@@ -435,6 +435,8 @@ onMasterMessage(async (msg: any) => {
             handleApiCall(msg);
         } else if (msg.type === 'config_sync') {
             applyRuntimeConfig(msg.config || {}, true);
+        } else if (msg.type === 'reload_config') {
+            if (typeof loadConfigs === 'function') loadConfigs();
         }
     } catch (e: any) {
         sendToMaster({ type: 'error', error: e.message });

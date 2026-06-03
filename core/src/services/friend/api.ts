@@ -209,6 +209,17 @@ export async function putWeedsDetailed(friendGid: number, landIds: number[]): Pr
     return putPlantItemsDetailed(friendGid, landIds, types.PutWeedsRequest, types.PutWeedsReply, 'PutWeeds');
 }
 
+// 使用社交道具（如友谊果实）
+export async function putSocialItem(friendGid: number, landId: number, itemId: number): Promise<any> {
+    const body: Uint8Array = types.PutSocialItemRequest.encode(types.PutSocialItemRequest.create({
+        host_gid: toLong(friendGid),
+        land_id: toLong(landId),
+        item_id: toLong(itemId),
+    })).finish();
+    const { body: replyBody } = await sendMsgAsync('gamepb.plantpb.PlantService', 'PutSocialItem', body);
+    return types.PutSocialItemReply.decode(replyBody);
+}
+
 export async function checkCanOperateRemote(friendGid: number, operationId: number): Promise<{ canOperate: boolean; canStealNum: number }> {
     if (!types.CheckCanOperateRequest || !types.CheckCanOperateReply) {
         return { canOperate: true, canStealNum: 0 };

@@ -15,9 +15,8 @@ message IllustratedItem {
     bool planted = 3;
     int32 planted_count = 4;
     int32 harvest_count = 5;
-    int32 category = 6;
-    bytes reward_info = 7;
-    bool has_reward = 8;
+    bytes reward_detail = 6;   // 服务器改为子消息，用 bytes 兼容
+    bool has_reward = 7;       // 从 field 8 移到 field 7
 }
 
 message GetIllustratedListV2Reply {
@@ -34,3 +33,10 @@ message ClaimAllRewardsV2Reply {
 }
 
 message IllustratedRewardRedDotNotifyV2 {}
+
+// ============ 清除新解锁水果标记 V2 ============
+message ClearNewUnlockedFruitsV2Request {
+    int64 seed_id = 1;
+}
+
+message ClearNewUnlockedFruitsV2Reply {}

@@ -29,6 +29,9 @@ api.interceptors.response.use((response) => {
 }, (error) => {
   const toast = useToastStore()
 
+  // 支持 skipErrorToast 配置，让调用方自行处理错误
+  const skipToast = error.config?.skipErrorToast
+
   if (error.response) {
     if (error.response.status === 401) {
       // Avoid redirect loop or multiple redirects
@@ -44,20 +47,25 @@ api.interceptors.response.use((response) => {
       if (backendError === '账号未运行' || backendError === 'API Timeout') {
         return Promise.reject(error)
       }
-      toast.error(`服务器错误: ${error.response.status} ${error.response.statusText}`)
+      if (!skipToast) {
+        toast.error(`服务器错误: ${error.response.status} ${error.response.statusText}`)
+      }
     }
     else {
-      // const msg = error.response.data?.message || error.message
-      // Don't show toast for 404 if it's expected in some logic?
-      // Generally for API calls, 404 is an error.
-      toast.error(`请求失败，请联系管理员！`)
+      if (!skipToast) {
+        toast.error(`请求失败，请联系管理员！`)
+      }
     }
   }
   else if (error.request) {
-    toast.error('网络错误，无法连接到服务器')
+    if (!skipToast) {
+      toast.error('网络错误，无法连接到服务器')
+    }
   }
   else {
-    toast.error(`错误: ${error.message}`)
+    if (!skipToast) {
+      toast.error(`错误: ${error.message}`)
+    }
   }
 
   return Promise.reject(error)

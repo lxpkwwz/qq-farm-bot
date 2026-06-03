@@ -1,6 +1,9 @@
 export {};
 import type { Application, Request, Response } from 'express';
 import type { AdminContext } from './context';
+import multer from 'multer';
+import path from 'node:path';
+import fs from 'node:fs';
 
 /**
  * Farm-related routes: status, automation, fertilizer, lands, seeds, bag,
@@ -458,6 +461,206 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
             const { getPlantRankings } = require('../../services/analytics');
             const data = getPlantRankings(sortBy);
             res.json({ ok: true, data });
+        } catch (e: any) {
+            res.status(500).json({ ok: false, error: e.message });
+        }
+    });
+
+    // API: 种子录入
+    const seedImageDir = path.join(__dirname, '../../gameConfig/seed_images_named');
+    const seedImageUpload = multer({
+        storage: multer.memoryStorage(),
+        limits: { fileSize: 2 * 1024 * 1024 },
+        fileFilter: (_req: Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
+            const allowed = ['.png', '.jpg', '.jpeg', '.webp'];
+            const ext = path.extname(file.originalname).toLowerCase();
+            if (allowed.includes(ext)) {
+                cb(null, true);
+            } else {
+                cb(new Error('仅支持 png, jpg, webp 格式图片'));
+            }
+        },
+    });
+
+    app.post('/api/seed', seedImageUpload.single('image'), async (req: Request, res: Response) => {
+        try {
+            const body = req.body;
+
+            // 验证必填字段
+            const seedId = Number(body.seed_id);
+            const name = String(body.name || '').trim();
+            const growPhases = String(body.grow_phases || '').trim();
+            const landLevelNeed = Number(body.land_level_need);
+            const seasons = Number(body.seasons) || 1;
+            const fruitCount = Number(body.fruit_count) || 0;
+            const price = Number(body.price) || 0;
+
+            if (!seedId || seedId <= 0) {
+                return res.status(400).json({ ok: false, error: '种子ID必须为正整数' });
+            }
+            if (!name) {
+                return res.status(400).json({ ok: false, error: '作物名称不能为空' });
+            }
+            if (!growPhases) {
+                return res.status(400).json({ ok: false, error: '生长阶段不能为空' });
+            }
+            if (!landLevelNeed || landLevelNeed <= 0) {
+                return res.status(400).json({ ok: false, error: '等级要求必须为正整数' });
+            }
+            if (![1, 2].includes(seasons)) {
+                return res.status(400).json({ ok: false, error: '季节数必须为1或2' });
+            }
+            if (fruitCount <= 0) {
+                return res.status(400).json({ ok: false, error: '收获数量必须为正整数' });
+            }
+            if (price < 0) {
+                return res.status(400).json({ ok: false, error: '种子价格不能为负数' });
+            }
+
+            // 检查种子ID是否已存在
+            const { getPlantBySeedId, loadConfigs: reloadConfigs } = require('../../config/gameConfig');
+            const existing = getPlantBySeedId(seedId);
+            if (existing) {
+                return res.status(400).json({ ok: false, error: `种子ID ${seedId} 已存在（${existing.name}）` });
+            }
+
+            // 根据 seedId 生成关联 ID
+            // plantId = 1000000 + seedId (如 seedId=21135 → plantId=1021135)
+            // fruitId = 40000 + seedId (如 seedId=21135 → fruitId=41135)
+            // seedItemId = seedId 本身
+            const configDir = path.join(__dirname, '../../gameConfig');
+            const plantPath = path.join(configDir, 'Plant.json');
+            const itemInfoPath = path.join(configDir, 'ItemInfo.json');
+
+            const plantData: any[] = JSON.parse(fs.readFileSync(plantPath, 'utf8'));
+            const itemData: any[] = JSON.parse(fs.readFileSync(itemInfoPath, 'utf8'));
+
+            const newPlantId = 1000000 + seedId;
+            const newFruitId = 20000 + seedId;
+
+            // 读取选填字段
+            const exp = Number(body.exp) || 0;
+            const size = Number(body.size) || 0;
+            // 资源自动生成: Crop_{seedId}
+            const assetName = `Crop_${seedId}`;
+
+            // 构建 Plant.json 条目
+            const plantEntry = {
+                id: newPlantId,
+                name,
+                mutant: '',
+                fruit: {
+                    id: newFruitId,
+                    count: fruitCount,
+                },
+                seed_id: seedId,
+                land_level_need: landLevelNeed,
+                seasons,
+                grow_phases: growPhases,
+                exp,
+                size,
+                offsetPosition: { x: 0, y: 0 },
+                mutantEffectScale: { x: 1, y: 1 },
+                harvestOffsetPosition: { x: -35, y: 40 },
+                harvestRandom: false,
+                harvestAllSpineRes: '',
+                harvestAllOffsetPosition: '',
+                all_state_spine: '',
+                mature_effect: 'effect/prefab/effect_plant_maturation',
+                mature_effect_offset: { x: 0, y: 0 },
+                rare_plant_light_pos: '',
+                exp_root: 0,
+                exp_alter: 0,
+                fruit_root: 0,
+                fruit_alter: 0,
+            };
+
+            // 构建 ItemInfo.json 种子条目
+            const seedItemEntry = {
+                id: seedId,
+                type: 5,
+                name: `${name}种子`,
+                interaction_type: 'plant',
+                price_id: 0,
+                price,
+                level: landLevelNeed,
+                target_id: 0,
+                asset_name: assetName || `Crop_${seedId}`,
+                icon_res: '',
+                max_count: 9999,
+                max_own: 9999,
+                can_use: 0,
+                desc: `种植后，可以收获一定数量的${name}。`,
+                effectDesc: name,
+                trait_id: 0,
+                layer: 13,
+                rarity: 1,
+                rarity_color: 'D2C5AC',
+                jumps: '',
+                ware_scale: null,
+            };
+
+            // 构建 ItemInfo.json 果实条目
+            const fruitItemEntry = {
+                id: newFruitId,
+                type: 6,
+                name,
+                interaction_type: '',
+                price_id: 0,
+                price: Math.round(price * 0.25),
+                level: landLevelNeed,
+                target_id: 0,
+                asset_name: assetName || `Crop_${seedId}`,
+                icon_res: '',
+                max_count: 999,
+                max_own: 999,
+                can_use: 0,
+                desc: `${name}的果实，可以出售换取金币。`,
+                effectDesc: name,
+                trait_id: 0,
+                layer: 0,
+                rarity: 1,
+                rarity_color: 'D2C5AC',
+                jumps: '',
+                ware_scale: null,
+            };
+
+            // 写入数据
+            plantData.push(plantEntry);
+            itemData.push(seedItemEntry);
+            itemData.push(fruitItemEntry);
+
+            fs.writeFileSync(plantPath, JSON.stringify(plantData, null, 4), 'utf8');
+            fs.writeFileSync(itemInfoPath, JSON.stringify(itemData, null, 4), 'utf8');
+
+            // 处理图片上传：直接写入最终文件（覆盖已有文件）
+            if (req.file && req.file.buffer) {
+                if (!fs.existsSync(seedImageDir)) {
+                    fs.mkdirSync(seedImageDir, { recursive: true });
+                }
+                const finalPath = path.join(seedImageDir, `${assetName}_Seed.png`);
+                fs.writeFileSync(finalPath, req.file.buffer);
+            }
+
+            // 重新加载配置
+            if (typeof reloadConfigs === 'function') {
+                reloadConfigs();
+            }
+
+            // 通知 worker 进程刷新游戏配置
+            if (ctx.provider && typeof ctx.provider.broadcastGameConfigReload === 'function') {
+                ctx.provider.broadcastGameConfigReload();
+            }
+
+            res.json({
+                ok: true,
+                data: {
+                    plantId: newPlantId,
+                    seedId,
+                    fruitId: newFruitId,
+                    name,
+                },
+            });
         } catch (e: any) {
             res.status(500).json({ ok: false, error: e.message });
         }

@@ -416,6 +416,32 @@ function handleNotify(msg: any): void {
                 const notify = types.ActiviesChangeNotify.decode(eventBody);
                 networkEvents.emit('activitiesChanged', notify);
             } catch {}
+            return;
+        }
+
+        // 头像框红点通知
+        if (type.includes('AvatarFrameRedDotNotify')) {
+            try {
+                networkEvents.emit('avatarFrameRedDot');
+            } catch {}
+            return;
+        }
+
+        // 图鉴奖励红点通知
+        if (type.includes('IllustratedRewardRedDotNotifyV2')) {
+            try {
+                networkEvents.emit('illustratedRewardRedDot');
+            } catch {}
+            return;
+        }
+
+        // 充值信息变更通知
+        if (type.includes('RechargeInfoNotify')) {
+            try {
+                const notify = types.RechargeInfoNotify.decode(eventBody);
+                networkEvents.emit('rechargeInfoChanged', notify);
+            } catch {}
+            return;
         }
     } catch (e: any) {
         logWarn('推送', `解码失败: ${e.message}`);

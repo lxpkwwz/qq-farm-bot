@@ -46,6 +46,7 @@ async function loadProto(): Promise<void> {
         getResourcePath('proto', 'paypb.proto'),
         getResourcePath('proto', 'rechargebonuspb.proto'),
         getResourcePath('proto', 'uicproxypb.proto'),
+        getResourcePath('proto', 'mutantpb.proto'),
     ], { keepCase: true });
 
     // 网关
@@ -68,6 +69,8 @@ async function loadProto(): Promise<void> {
     types.SetQQFriendRecommendAuthorizedReply = root.lookupType('gamepb.userpb.SetQQFriendRecommendAuthorizedReply');
     types.GetUserSettingsRequest = root.lookupType('gamepb.userpb.GetUserSettingsRequest');
     types.GetUserSettingsReply = root.lookupType('gamepb.userpb.GetUserSettingsReply');
+    types.BatchGetBasicInfoRequest = root.lookupType('gamepb.userpb.BatchGetBasicInfoRequest');
+    types.BatchGetBasicInfoReply = root.lookupType('gamepb.userpb.BatchGetBasicInfoReply');
 
     // 农场
     types.AllLandsRequest = root.lookupType('gamepb.plantpb.AllLandsRequest');
@@ -96,6 +99,8 @@ async function loadProto(): Promise<void> {
     types.CheckCanOperateReply = root.lookupType('gamepb.plantpb.CheckCanOperateReply');
     types.FertilizeRequest = root.lookupType('gamepb.plantpb.FertilizeRequest');
     types.FertilizeReply = root.lookupType('gamepb.plantpb.FertilizeReply');
+    types.PutSocialItemRequest = root.lookupType('gamepb.plantpb.PutSocialItemRequest');
+    types.PutSocialItemReply = root.lookupType('gamepb.plantpb.PutSocialItemReply');
 
     // 背包/仓库
     types.BagRequest = root.lookupType('gamepb.itempb.BagRequest');
@@ -143,6 +148,8 @@ async function loadProto(): Promise<void> {
     types.GetIllustratedListV2Reply = root.lookupType('gamepb.illustratedpb.GetIllustratedListV2Reply');
     types.ClaimAllRewardsV2Request = root.lookupType('gamepb.illustratedpb.ClaimAllRewardsV2Request');
     types.ClaimAllRewardsV2Reply = root.lookupType('gamepb.illustratedpb.ClaimAllRewardsV2Reply');
+    types.ClearNewUnlockedFruitsV2Request = root.lookupType('gamepb.illustratedpb.ClearNewUnlockedFruitsV2Request');
+    types.ClearNewUnlockedFruitsV2Reply = root.lookupType('gamepb.illustratedpb.ClearNewUnlockedFruitsV2Reply');
 
     // 好友
     types.GetAllFriendsRequest = root.lookupType('gamepb.friendpb.GetAllRequest');
@@ -223,6 +230,10 @@ async function loadProto(): Promise<void> {
     types.AntiDataRequest = root.lookupType('gamepb.acepb.AntiDataRequest');
     types.AntiDataReply = root.lookupType('gamepb.acepb.AntiDataReply');
 
+    // 变异
+    types.ReadMutantBookRequest = root.lookupType('gamepb.mutantpb.ReadMutantBookRequest');
+    types.ReadMutantBookReply = root.lookupType('gamepb.mutantpb.ReadMutantBookReply');
+
     // 职业
     types.CareerInfoGetRequest = root.lookupType('gamepb.careerpb.CareerInfoGetRequest');
     types.CareerInfoGetReply = root.lookupType('gamepb.careerpb.CareerInfoGetReply');
@@ -252,6 +263,7 @@ async function loadProto(): Promise<void> {
     // 充值
     types.GetRechargeInfoRequest = root.lookupType('gamepb.paypb.GetRechargeInfoRequest');
     types.GetRechargeInfoReply = root.lookupType('gamepb.paypb.GetRechargeInfoReply');
+    types.RechargeInfoNotify = root.lookupType('gamepb.paypb.RechargeInfoNotify');
 
     // 充值奖励
     types.GetRechargeBonusConfigRequest = root.lookupType('gamepb.rechargebonuspb.GetConfigRequest');

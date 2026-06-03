@@ -161,6 +161,15 @@ message GetUserSettingsReply {
     UserSettings settings = 1;
 }
 
+// ============ 批量获取用户信息 ============
+message BatchGetBasicInfoRequest {
+    repeated int64 gids = 1;
+}
+
+message BatchGetBasicInfoReply {
+    repeated BasicInfo users = 1;
+}
+
 // ============ 服务器推送通知 ============
 
 // 基本信息变化通知 (升级/金币变化等)

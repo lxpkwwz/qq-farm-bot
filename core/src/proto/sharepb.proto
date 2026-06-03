@@ -38,13 +38,12 @@ message GetInviteInfoRequest {
     int64 share_cfg_id = 1;
 }
 
+// 注意: InviteInfo 结构已大幅变更 (field 2 从 string 改为 int64,
+// field 3/4 改为嵌套消息)，暂时无法完全逆向。
+// 只保留 share_cfg_id，其他字段由 protobufjs 自动跳过。
 message InviteInfo {
     int64 share_cfg_id = 1;
-    string share_key = 2;
-    string share_url = 3;
-    int64 invite_count = 4;
-    int64 reward_count = 5;
-    bool can_claim = 6;
+    // field 2-14 已变更，待后续逆向确认
 }
 
 message GetInviteInfoReply {

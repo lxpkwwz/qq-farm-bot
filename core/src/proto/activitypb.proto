@@ -9,14 +9,15 @@ import "corepb.proto";
 // --- 获取活动列表 ---
 message ActivityItem {
     int64 activity_id = 1;
-    string name = 2;
-    int32 status = 3;           // 活动状态
-    int64 begin_time = 4;
-    int64 end_time = 5;
-    int32 type = 6;
-    string icon_url = 7;
-    int32 sort_order = 8;
-    int32 group_id = 9;
+    // field 2 可能已废弃
+    int32 status = 3;
+    string name = 4;           // 从 field 2 移到 field 4
+    bytes extra = 5;           // 新增字段 (未知结构)
+    int64 begin_time = 6;      // 从 field 4 移到 field 6
+    int64 end_time = 7;        // 从 field 5 移到 field 7
+    int32 type = 8;            // 从 field 6 移到 field 8
+    int32 group_id = 9;        // 保持不变
+    int32 sort_order = 10;     // 从 field 8 移到 field 10
 }
 
 message ListRequest {}

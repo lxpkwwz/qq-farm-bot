@@ -114,6 +114,7 @@ function createRuntimeEngine(options: RuntimeEngineOptions = {}) {
         addAccountLog,
         nextConfigRevision,
         broadcastConfigToWorkers,
+        broadcastGameConfigReload,
         startWorker,
         stopWorker,
         restartWorker,
@@ -133,6 +134,16 @@ function createRuntimeEngine(options: RuntimeEngineOptions = {}) {
             const snapshot = buildConfigSnapshotForAccount(accId);
             try {
                 (worker as any).process.send({ type: 'config_sync', config: snapshot });
+            } catch {
+                // ignore IPC failures for exited workers
+            }
+        }
+    }
+
+    function broadcastGameConfigReload(): void {
+        for (const worker of Object.values(workers)) {
+            try {
+                (worker as any).process.send({ type: 'reload_config' });
             } catch {
                 // ignore IPC failures for exited workers
             }
@@ -183,6 +194,7 @@ function createRuntimeEngine(options: RuntimeEngineOptions = {}) {
         startAllAccounts,
         stopAllAccounts,
         broadcastConfigToWorkers,
+        broadcastGameConfigReload,
         startWorker,
         stopWorker,
         restartWorker,

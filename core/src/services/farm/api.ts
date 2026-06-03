@@ -169,6 +169,13 @@ async function buyGoods(goodsId: number, num: number, price: number): Promise<an
     return types.BuyGoodsReply.decode(replyBody);
 }
 
+// ============ 变异图鉴 ============
+
+async function readMutantBook(): Promise<void> {
+    const body: Uint8Array = types.ReadMutantBookRequest.encode(types.ReadMutantBookRequest.create({})).finish();
+    await sendMsgAsync('gamepb.mutantpb.MutantService', 'ReadMutantBook', body);
+}
+
 // ============ 种植编码 ============
 
 function encodePlantRequest(seedId: number | string, landIds: number[]): Uint8Array {
@@ -199,4 +206,5 @@ module.exports = {
     getShopInfo,
     buyGoods,
     encodePlantRequest,
+    readMutantBook,
 };

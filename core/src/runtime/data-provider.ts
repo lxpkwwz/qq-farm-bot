@@ -15,6 +15,7 @@ interface DataProviderOptions {
     addAccountLog: (action: string, msg: string, accountId?: string, accountName?: string, extra?: any) => void;
     nextConfigRevision: () => number;
     broadcastConfigToWorkers: (accountId?: string) => void;
+    broadcastGameConfigReload?: () => void;
     startWorker: (account: any) => boolean;
     stopWorker: (accountId: string) => void;
     restartWorker: (account: any) => void;
@@ -34,6 +35,7 @@ function createDataProvider(options: DataProviderOptions) {
         addAccountLog,
         nextConfigRevision,
         broadcastConfigToWorkers,
+        broadcastGameConfigReload: broadcastGameConfigReloadOpt,
         startWorker,
         stopWorker,
         restartWorker,
@@ -189,6 +191,10 @@ function createDataProvider(options: DataProviderOptions) {
 
         broadcastConfig: (accountId: string) => {
             broadcastConfigToWorkers(accountId);
+        },
+
+        broadcastGameConfigReload: () => {
+            if (typeof broadcastGameConfigReloadOpt === 'function') broadcastGameConfigReloadOpt();
         },
 
         setRuntimeAccountName: (accountRef: string, accountName: string) => {

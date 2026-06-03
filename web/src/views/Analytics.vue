@@ -3,17 +3,21 @@ import { storeToRefs } from 'pinia'
 import { computed, onMounted, ref, watch } from 'vue'
 import api from '@/api'
 import BaseSelect from '@/components/ui/BaseSelect.vue'
+import SeedModal from '@/components/SeedModal.vue'
 import { useAccountStore } from '@/stores/account'
 import { usePlantBlacklistStore } from '@/stores/plant-blacklist'
+import { useSettingStore } from '@/stores/setting'
 import { useStatusStore } from '@/stores/status'
 import { useToastStore } from '@/stores/toast'
 
 const accountStore = useAccountStore()
 const plantBlacklistStore = usePlantBlacklistStore()
+const settingStore = useSettingStore()
 const toast = useToastStore()
 const statusStore = useStatusStore()
 const { currentAccountId } = storeToRefs(accountStore)
 const { blacklist } = storeToRefs(plantBlacklistStore)
+const { settings } = storeToRefs(settingStore)
 const { status } = storeToRefs(statusStore)
 
 const loading = ref(false)
@@ -22,6 +26,7 @@ const sortKey = ref('exp')
 const imageErrors = ref<Record<string | number, boolean>>({})
 const searchKeyword = ref('')
 const batchLoading = ref(false)
+const showSeedModal = ref(false)
 
 const activeTab = ref('crops')
 
@@ -70,7 +75,41 @@ const strategies = [
     unit: '金币',
     desc: '使用普通化肥后利润最高',
   },
+  {
+    key: 'level',
+    label: '最高等级',
+    metric: 'level',
+    color: 'rose',
+    icon: '⭐',
+    unit: 'Lv',
+    desc: '等级最高的作物',
+  },
 ]
+
+const strategyLabelMap: Record<string, string> = {
+  preferred: '优先种植种子',
+  level: '最高等级作物',
+  max_exp: '最大经验/时',
+  max_fert_exp: '最大普通肥经验/时',
+  max_profit: '最大净利润/时',
+  max_fert_profit: '最大普通肥净利润/时',
+  bag_priority: '背包种子优先',
+}
+
+const currentStrategy = computed(() => settings.value?.plantingStrategy || 'max_exp')
+const currentStrategyLabel = computed(() => strategyLabelMap[currentStrategy.value] || currentStrategy.value)
+const preferredSeedId = computed(() => settings.value?.preferredSeedId || 0)
+
+const currentStrategyBestPlant = computed(() => {
+  if (currentStrategy.value === 'preferred' && preferredSeedId.value > 0) {
+    const found = list.value.find((item: any) => item.seedId === preferredSeedId.value)
+    if (found) return found
+  }
+  if (currentStrategy.value === 'bag_priority') {
+    return null
+  }
+  return getStrategyBestPlant(currentStrategy.value)
+})
 
 function getStrategyBestPlant(strategyKey: string) {
   const strategy = strategies.find(s => s.key === strategyKey)
@@ -270,13 +309,24 @@ async function handleClearBlacklist() {
   }
 }
 
+function handleSeedSaved() {
+  toast.success('种子录入成功！')
+  loadAnalytics()
+}
+
 onMounted(() => {
   loadAnalytics()
   plantBlacklistStore.fetchBlacklist()
+  if (currentAccountId.value) {
+    settingStore.fetchSettings(currentAccountId.value)
+  }
 })
 
 watch([currentAccountId, sortKey], () => {
   loadAnalytics()
+  if (currentAccountId.value) {
+    settingStore.fetchSettings(currentAccountId.value)
+  }
 })
 
 function formatLv(level: any) {
@@ -379,6 +429,13 @@ function formatGrowTime(seconds: any) {
                 共 {{ list.length }} 种作物
               </p>
             </div>
+            <button
+              class="cartoon-btn flex items-center gap-1 rounded-xl bg-green-50 px-3 py-1.5 text-sm text-green-600 transition dark:bg-green-900/20 hover:bg-green-100 dark:text-green-400 dark:hover:bg-green-900/30"
+              @click="showSeedModal = true"
+            >
+              <span>➕</span>
+              种子录入
+            </button>
           </div>
           <div class="flex items-center gap-2">
             <div class="relative">
@@ -653,99 +710,163 @@ function formatGrowTime(seconds: any) {
         </div>
       </div>
 
-      <div v-if="activeTab === 'strategy'" class="farm-card overflow-hidden border border-gray-200 rounded-2xl bg-white shadow-md dark:border-gray-700 dark:bg-gray-800">
-        <div class="border-b border-gray-200 bg-gray-50 p-4 dark:border-gray-700 dark:bg-gray-700/50">
-          <div class="flex items-center justify-between">
-            <div class="flex items-center gap-3">
-              <span class="text-xl text-blue-500">📊</span>
-              <div>
-                <h3 class="text-gray-700 font-semibold dark:text-gray-300">
-                  策略推荐
-                </h3>
-                <p class="text-xs text-gray-500 dark:text-gray-400">
-                  根据等级推荐最优种植策略
-                </p>
+      <div v-if="activeTab === 'strategy'" class="space-y-4">
+        <div class="farm-card overflow-hidden border border-blue-200 rounded-2xl bg-gradient-to-r from-blue-50 to-indigo-50 shadow-md dark:border-blue-800 dark:from-blue-900/20 dark:to-indigo-900/20">
+          <div class="p-4">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-3">
+                <span class="text-xl text-blue-500">🎯</span>
+                <div>
+                  <h3 class="text-gray-700 font-semibold dark:text-gray-300">
+                    当前策略: {{ currentStrategyLabel }}
+                  </h3>
+                  <p class="text-xs text-gray-500 dark:text-gray-400">
+                    与设置页种植策略同步
+                  </p>
+                </div>
               </div>
             </div>
-            <div class="flex items-center gap-2">
-              <span class="text-sm text-gray-500">参考等级:</span>
-              <input
-                v-model.number="strategyLevel"
-                type="number"
-                min="1"
-                max="100"
-                class="farm-input w-16 border border-gray-300 rounded-xl bg-white px-3 py-1.5 text-center text-sm outline-none dark:border-gray-600 focus:border-blue-400 dark:bg-gray-700 dark:text-gray-200"
-              >
+
+            <div v-if="currentStrategy === 'bag_priority'" class="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-700 dark:bg-amber-900/20 dark:text-amber-300">
+              背包种子优先策略：优先使用背包中的种子，按背包优先级排序，用完后回退到商店购买。具体种植内容取决于背包中实际持有的种子。
+            </div>
+            <div v-else-if="currentStrategyBestPlant" class="mt-3 flex items-center gap-3">
+              <div class="h-12 w-12 flex shrink-0 items-center justify-center overflow-hidden border border-blue-200 rounded-lg bg-white dark:border-blue-700 dark:bg-gray-800">
+                <img
+                  v-if="currentStrategyBestPlant.image && !imageErrors[currentStrategyBestPlant.seedId]"
+                  :src="currentStrategyBestPlant.image"
+                  class="h-10 w-10 object-contain"
+                  loading="lazy"
+                  @error="imageErrors[currentStrategyBestPlant.seedId] = true"
+                >
+                <span v-else class="text-2xl text-gray-400">🌱</span>
+              </div>
+              <div class="flex-1">
+                <div class="text-gray-800 font-bold dark:text-gray-100">
+                  {{ currentStrategyBestPlant.name }}
+                  <span class="ml-1 text-xs text-gray-500">Lv{{ formatLv(currentStrategyBestPlant.level) }}</span>
+                  <span class="ml-1 text-xs text-gray-400">{{ currentStrategyBestPlant.seasons }}季</span>
+                </div>
+                <div class="mt-1 flex flex-wrap gap-3 text-xs">
+                  <span v-if="currentStrategyBestPlant.expPerHour" class="text-purple-600 dark:text-purple-400">经验/时: {{ currentStrategyBestPlant.expPerHour }}</span>
+                  <span v-if="currentStrategyBestPlant.profitPerHour" class="text-amber-600 dark:text-amber-400">利润/时: {{ currentStrategyBestPlant.profitPerHour }}</span>
+                  <span v-if="currentStrategyBestPlant.normalFertilizerExpPerHour" class="text-blue-600 dark:text-blue-400">普肥经验/时: {{ currentStrategyBestPlant.normalFertilizerExpPerHour }}</span>
+                  <span v-if="currentStrategyBestPlant.normalFertilizerProfitPerHour" class="text-green-600 dark:text-green-400">普肥利润/时: {{ currentStrategyBestPlant.normalFertilizerProfitPerHour }}</span>
+                </div>
+              </div>
+            </div>
+            <div v-else class="mt-3 text-sm text-gray-400">
+              暂无可种植作物
             </div>
           </div>
         </div>
 
-        <div class="p-4">
-          <div class="grid grid-cols-2 gap-3 lg:grid-cols-4">
-            <div
-              v-for="strategy in strategies"
-              :key="strategy.key"
-              class="cartoon-card overflow-hidden border rounded-2xl bg-white transition-shadow dark:bg-gray-800 hover:shadow-md"
-              :class="getColorClass(strategy.color, 'border')"
-            >
-              <div class="p-3">
-                <div class="mb-2 flex items-center gap-2">
-                  <div
-                    class="h-7 w-7 flex shrink-0 items-center justify-center rounded-lg bg-gradient-to-br text-white"
-                    :class="getColorClass(strategy.color, 'gradient')"
-                  >
-                    <div class="text-sm" :class="strategy.icon" />
-                  </div>
-                  <div class="min-w-0 flex-1">
-                    <div class="truncate text-sm font-semibold" :class="getColorClass(strategy.color, 'text')">
-                      {{ strategy.label }}
-                    </div>
-                  </div>
+        <div class="farm-card overflow-hidden border border-gray-200 rounded-2xl bg-white shadow-md dark:border-gray-700 dark:bg-gray-800">
+          <div class="border-b border-gray-200 bg-gray-50 p-4 dark:border-gray-700 dark:bg-gray-700/50">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-3">
+                <span class="text-xl text-blue-500">📊</span>
+                <div>
+                  <h3 class="text-gray-700 font-semibold dark:text-gray-300">
+                    策略对比
+                  </h3>
+                  <p class="text-xs text-gray-500 dark:text-gray-400">
+                    各策略下可种植的最优作物
+                  </p>
                 </div>
-
-                <div v-if="getStrategyBestPlant(strategy.key)" class="space-y-2">
-                  <div class="flex items-center gap-2">
-                    <div class="h-10 w-10 flex shrink-0 items-center justify-center overflow-hidden border rounded-lg bg-gray-50 dark:border-gray-600 dark:bg-gray-700" :class="getColorClass(strategy.color, 'border')">
-                      <img
-                        v-if="getStrategyBestPlant(strategy.key)?.image && !imageErrors[getStrategyBestPlant(strategy.key)?.seedId]"
-                        :src="getStrategyBestPlant(strategy.key)?.image"
-                        class="h-8 w-8 object-contain"
-                        loading="lazy"
-                        @error="imageErrors[getStrategyBestPlant(strategy.key)?.seedId] = true"
-                      >
-                      <span v-else class="text-lg text-gray-400">🌱</span>
-                    </div>
-                    <div class="min-w-0 flex-1">
-                      <div class="truncate text-sm text-gray-800 font-medium dark:text-gray-200">
-                        {{ getStrategyBestPlant(strategy.key)?.name }}
-                      </div>
-                      <div class="text-xs text-gray-500">
-                        Lv{{ formatLv(getStrategyBestPlant(strategy.key)?.level) }}
-                      </div>
-                    </div>
-                  </div>
-                  <div class="rounded-md bg-gray-50 px-2 py-1.5 dark:bg-gray-900/50">
-                    <div class="flex items-baseline justify-between">
-                      <span class="text-xs text-gray-500">{{ strategy.unit }}/时</span>
-                      <span class="text-base font-bold" :class="getColorClass(strategy.color, 'text')">
-                        {{ getStrategyBestPlant(strategy.key)?.[strategy.metric] }}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-                <div v-else class="py-3 text-center text-xs text-gray-400">
-                  暂无可种植作物
-                </div>
+              </div>
+              <div class="flex items-center gap-2">
+                <span class="text-sm text-gray-500">参考等级:</span>
+                <input
+                  v-model.number="strategyLevel"
+                  type="number"
+                  min="1"
+                  max="100"
+                  class="farm-input w-16 border border-gray-300 rounded-xl bg-white px-3 py-1.5 text-center text-sm outline-none dark:border-gray-600 focus:border-blue-400 dark:bg-gray-700 dark:text-gray-200"
+                >
               </div>
             </div>
           </div>
 
-          <div class="mt-3 flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-            <span>💡</span>
-            <span>可种植 {{ getStrategyAvailableCount() }}/{{ list.length }} 种作物 · 策略计算与设置页面种植策略一致</span>
+          <div class="p-4">
+            <div class="grid grid-cols-2 gap-3 lg:grid-cols-4">
+              <div
+                v-for="strategy in strategies"
+                :key="strategy.key"
+                class="cartoon-card overflow-hidden border rounded-2xl bg-white transition-shadow dark:bg-gray-800 hover:shadow-md"
+                :class="[
+                  getColorClass(strategy.color, 'border'),
+                  currentStrategy === strategy.key ? 'ring-2 ring-blue-400 dark:ring-blue-500' : '',
+                ]"
+              >
+                <div class="p-3">
+                  <div class="mb-2 flex items-center gap-2">
+                    <div
+                      class="h-7 w-7 flex shrink-0 items-center justify-center rounded-lg bg-gradient-to-br text-white"
+                      :class="getColorClass(strategy.color, 'gradient')"
+                    >
+                      <div class="text-sm" :class="strategy.icon" />
+                    </div>
+                    <div class="min-w-0 flex-1">
+                      <div class="truncate text-sm font-semibold" :class="getColorClass(strategy.color, 'text')">
+                        {{ strategy.label }}
+                      </div>
+                      <div v-if="currentStrategy === strategy.key" class="text-[10px] text-blue-500 font-medium dark:text-blue-400">
+                        当前策略
+                      </div>
+                    </div>
+                  </div>
+
+                  <div v-if="getStrategyBestPlant(strategy.key)" class="space-y-2">
+                    <div class="flex items-center gap-2">
+                      <div class="h-10 w-10 flex shrink-0 items-center justify-center overflow-hidden border rounded-lg bg-gray-50 dark:border-gray-600 dark:bg-gray-700" :class="getColorClass(strategy.color, 'border')">
+                        <img
+                          v-if="getStrategyBestPlant(strategy.key)?.image && !imageErrors[getStrategyBestPlant(strategy.key)?.seedId]"
+                          :src="getStrategyBestPlant(strategy.key)?.image"
+                          class="h-8 w-8 object-contain"
+                          loading="lazy"
+                          @error="imageErrors[getStrategyBestPlant(strategy.key)?.seedId] = true"
+                        >
+                        <span v-else class="text-lg text-gray-400">🌱</span>
+                      </div>
+                      <div class="min-w-0 flex-1">
+                        <div class="truncate text-sm text-gray-800 font-medium dark:text-gray-200">
+                          {{ getStrategyBestPlant(strategy.key)?.name }}
+                        </div>
+                        <div class="text-xs text-gray-500">
+                          Lv{{ formatLv(getStrategyBestPlant(strategy.key)?.level) }}
+                        </div>
+                      </div>
+                    </div>
+                    <div class="rounded-md bg-gray-50 px-2 py-1.5 dark:bg-gray-900/50">
+                      <div class="flex items-baseline justify-between">
+                        <span class="text-xs text-gray-500">{{ strategy.unit }}/时</span>
+                        <span class="text-base font-bold" :class="getColorClass(strategy.color, 'text')">
+                          {{ getStrategyBestPlant(strategy.key)?.[strategy.metric] }}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  <div v-else class="py-3 text-center text-xs text-gray-400">
+                    暂无可种植作物
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="mt-3 flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+              <span>💡</span>
+              <span>可种植 {{ getStrategyAvailableCount() }}/{{ list.length }} 种作物 · 蓝色边框为当前设置的种植策略</span>
+            </div>
           </div>
         </div>
       </div>
     </div>
+
+    <SeedModal
+      :show="showSeedModal"
+      @close="showSeedModal = false"
+      @saved="handleSeedSaved"
+    />
   </div>
 </template>
