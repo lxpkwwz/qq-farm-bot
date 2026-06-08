@@ -33,7 +33,7 @@ let lastPushTime: number = 0;
 async function checkFarm(): Promise<boolean> {
     const state = getUserState();
     if (isCheckingFarm || !state.gid || !isAutomationOn('farm')) return false;
-    if (inFriendQuietHours()) return false;
+    // if (inFriendQuietHours()) return false;
     isCheckingFarm = true;
 
     try {
