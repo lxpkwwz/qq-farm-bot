@@ -805,7 +805,7 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
      */
     app.get('/api/config/plants', async (req: Request, res: Response) => {
         try {
-            const { getAllPlants, getSeedPrice, getSeedImageBySeedId } = require('../../config/gameConfig');
+            const { getAllPlants, getSeedPrice, getSeedImageBySeedId, getItemById } = require('../../config/gameConfig');
             const plants = getAllPlants();
             const data = plants.map((p: any) => ({
                 plantId: p.id,
@@ -813,7 +813,7 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
                 seedId: p.seed_id,
                 fruitId: p.fruit ? p.fruit.id : null,
                 fruitCount: p.fruit ? p.fruit.count : 0,
-                landLevelNeed: Number(p.land_level_need) || 0,
+                landLevelNeed: (() => { const si = getItemById(p.seed_id); return si ? Number(si.level || 0) : Number(p.land_level_need || 0); })(),
                 seasons: Number(p.seasons) || 1,
                 growPhases: p.grow_phases || '',
                 exp: Number(p.exp) || 0,

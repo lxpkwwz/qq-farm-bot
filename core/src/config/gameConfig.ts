@@ -211,7 +211,7 @@ function getAllSeeds(): SeedInfo[] {
     return Array.from(seedToPlant.values()).map(p => ({
         seedId: p.seed_id,
         name: p.name,
-        requiredLevel: Number(p.land_level_need) || 0,
+        requiredLevel: (() => { const si = seedItemMap.get(p.seed_id); return si ? (Number(si.level) || 0) : (Number(p.land_level_need) || 0); })(),
         price: getSeedPrice(p.seed_id),
         image: getSeedImageBySeedId(p.seed_id),
         seasons: Number(p.seasons) || 1,
