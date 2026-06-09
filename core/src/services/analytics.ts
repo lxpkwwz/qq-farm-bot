@@ -3,7 +3,7 @@ export {};
  * 数据分析模块 - 作物效率分析
  */
 
-const { getAllPlants, getFruitPrice, getSeedPrice, getItemImageById } = require('../config/gameConfig');
+const { getAllPlants, getFruitPrice, getSeedPrice, getItemImageById, getItemById } = require('../config/gameConfig');
 
 function parseGrowTime(growPhases: string): number {
     if (!growPhases) return 0;
@@ -98,7 +98,9 @@ function getPlantRankings(sortBy: string = 'exp'): PlantRankingResult[] {
         const profitPerHour: number = (netProfit / growTime) * 3600;
         const normalFertilizerProfitPerHour: number = (netProfit / safeFertilizedTime) * 3600;
 
-        const cfgLevel: number = Number(plant.land_level_need);
+        // 优先从 ItemInfo.json 获取种子等级（Plant.json 的 land_level_need 全为 1，不可用）
+        const seedItem: any = getItemById(Number(plant.seed_id) || 0);
+        const cfgLevel: number = seedItem ? Number(seedItem.level) : Number(plant.land_level_need);
         const requiredLevel: number | null = (Number.isFinite(cfgLevel) && cfgLevel > 0) ? cfgLevel : null;
         results.push({
             id: plant.id,

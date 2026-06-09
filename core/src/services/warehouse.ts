@@ -541,7 +541,7 @@ async function getBagSeeds(): Promise<any[]> {
             seedId,
             name: String(plant.name || `种子#${seedId}`),
             count: 0,
-            requiredLevel: Math.max(0, Number(plant.land_level_need || 0)),
+            requiredLevel: (() => { const si = getItemById(seedId); return si ? Math.max(0, Number(si.level || 0)) : Math.max(0, Number(plant.land_level_need || 0)); })(),
             image: getSeedImageBySeedId(seedId) || getItemImageById(seedId),
             plantSize: Math.max(1, Number(plant.size || 1)),
         };
