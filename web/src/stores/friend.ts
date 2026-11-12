@@ -99,7 +99,9 @@ export const useFriendStore = defineStore('friend', () => {
     updatedAt: number
   }>>({})
   const FRIEND_LAND_OVERLAY_TTL_MS = 15 * 60 * 1000
-  let friendLandRequestSequence = 0
+  // 每个好友各自一条请求序号：全局共用会在「展开 A 后立刻展开 B」时把 A 的结果丢弃，
+  // 并让 A 的 loading 永远停在 true（渲染层一直转圈）。
+  const friendLandRequestSeq = new Map<string, number>()
   let interactionItemsRequestSequence = 0
 
   function normalizeLandId(value: unknown) {
@@ -446,8 +448,9 @@ export const useFriendStore = defineStore('friend', () => {
   async function fetchFriendLands(accountId: string, friendId: string) {
     if (!accountId || !friendId)
       return false
-    const sequence = ++friendLandRequestSequence
     const key = String(friendId)
+    const sequence = (friendLandRequestSeq.get(key) || 0) + 1
+    friendLandRequestSeq.set(key, sequence)
     friendLandsLoading.value[key] = true
     friendLandsError.value[key] = ''
     friendLandsLoaded.value[key] = false
@@ -456,7 +459,7 @@ export const useFriendStore = defineStore('friend', () => {
         headers: { 'x-account-id': accountId },
         skipErrorToast: true,
       } as any)
-      if (sequence !== friendLandRequestSequence)
+      if (sequence !== (friendLandRequestSeq.get(key) || 0))
         return false
       if (res.data.ok) {
         const lands = applyFriendLandOverlay(key, res.data.data.lands || [])
@@ -472,7 +475,7 @@ export const useFriendStore = defineStore('friend', () => {
       return false
     }
     catch (error: any) {
-      if (sequence !== friendLandRequestSequence)
+      if (sequence !== (friendLandRequestSeq.get(key) || 0))
         return false
       friendLands.value[key] = []
       friendCareer.value = { ...friendCareer.value, [key]: null }
@@ -480,7 +483,7 @@ export const useFriendStore = defineStore('friend', () => {
       return false
     }
     finally {
-      if (sequence === friendLandRequestSequence) {
+      if (sequence === (friendLandRequestSeq.get(key) || 0)) {
         friendLandsLoaded.value[key] = true
         friendLandsLoading.value[key] = false
       }
@@ -488,7 +491,7 @@ export const useFriendStore = defineStore('friend', () => {
   }
 
   function resetFriendLandState() {
-    friendLandRequestSequence++
+    friendLandRequestSeq.clear()
     friendLands.value = {}
     friendLandsLoading.value = {}
     friendLandsError.value = {}

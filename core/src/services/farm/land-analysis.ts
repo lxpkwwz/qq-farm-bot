@@ -613,6 +613,7 @@ function getOrganicFertilizerTargetsFromLands(lands: any[]): number[] {
         const currentPhase = getCurrentPhase(plant.phases, false, '', toNum(plant.id));
         if (!currentPhase) continue;
         if (currentPhase.phase === PlantPhase.DEAD) continue;
+        if (currentPhase.phase === PlantPhase.MATURE) continue;
 
         targets.push(landId);
     }
@@ -1119,7 +1120,10 @@ function hasRemainingSeasons(plant: any): boolean {
     const totalSeason = Math.max(1, toNum(plantCfg && plantCfg.seasons) || 1);
     const rawSeason = toNum(plant.season);
     const currentSeason = rawSeason > 0 ? rawSeason : 1;
-    return currentSeason > 1 || currentSeason < totalSeason;
+    // 只有「当前季 < 总季数」才表示还有下一季。原先还额外把「当前季大于 1」当成有剩余季，
+    // 但那只是「不是第一季」，与是否还有下一季无关，会把末季作物误判成仍在生长
+    // （跳过铲除、并对其做无意义的补肥）。
+    return currentSeason < totalSeason;
 }
 
 function classifyHarvestedLandsByMap(landIds: number[], landsMap: Map<number, any>): {

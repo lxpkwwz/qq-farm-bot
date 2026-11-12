@@ -13,6 +13,25 @@ const API_CALL_TIMEOUTS_MS: Record<string, number> = {
     getWeatherFriends: 30000,
 };
 
+/**
+ * 断线来源的中文说明。账号日志直接带上这句，用户不用翻英文 source
+ * 就能判断这次掉线是「服务端关的连接」还是「Code 失效/心跳静默」。
+ */
+const DISCONNECT_SOURCE_LABELS: Record<string, string> = {
+    ws_close: '服务端关闭连接',
+    ws_error: '连接被拒绝（Code 或版本不符）',
+    login_failed: '登录验证失败（Code 失效）',
+    login_timeout: '登录响应超时',
+    login_send_failed: '登录请求发送失败',
+    login_init_failed: '登录后初始化失败',
+    heartbeat_timeout: '心跳超时（连接已静默）',
+};
+
+function describeDisconnectSource(source: string, code: number): string {
+    const label = DISCONNECT_SOURCE_LABELS[String(source || '')] || `连接中断（${source || '未知来源'}）`;
+    return code ? `${label}，关闭码 ${code}` : label;
+}
+
 interface WorkerManagerOptions {
     fork: any;
     WorkerThread: any;
@@ -381,14 +400,14 @@ function createWorkerManager(options: WorkerManagerOptions) {
             const reason = msg.reason || '未知';
             const reasonCode = Number(msg.reasonCode) || 0;
             const diagnostics = msg.diagnostics || null;
-            log('系统', `账号 ${worker.name} 被踢下线，已自动停止账号`, { accountId: String(accountId), accountName: worker.name, reasonCode, diagnostics });
+            log('系统', `账号 ${worker.name} 被踢下线（原因: ${reason}${reasonCode ? `，码 ${reasonCode}` : ''}），已自动停止账号`, { accountId: String(accountId), accountName: worker.name, reasonCode, diagnostics });
             triggerOfflineReminder({
                 accountId,
                 accountName: worker.name,
                 reason: `kickout:${reason}`,
                 offlineMs: 0,
             });
-            addAccountLog('kickout_stop', `账号 ${worker.name} 被踢下线，已自动停止`, accountId, worker.name, { reason, reasonCode, diagnostics });
+            addAccountLog('kickout_stop', `账号 ${worker.name} 被踢下线（原因: ${reason}${reasonCode ? `，码 ${reasonCode}` : ''}），已自动停止`, accountId, worker.name, { reason, reasonCode, diagnostics });
             stopWorker(accountId);
             reportAccountOffline(accountId, worker.name, `kickout:${reason}`);
         } else if (msg.type === 'account_disconnected') {
@@ -406,7 +425,7 @@ function createWorkerManager(options: WorkerManagerOptions) {
                 }
                 worker.requests.clear();
             }
-            log('系统', `账号 ${worker.name} 连接已断开，已停止运行并等待 Helper 刷新 Code 或重新扫码`, {
+            log('系统', `账号 ${worker.name} 连接已断开（${describeDisconnectSource(source, code)}），已停止运行，开启「掉线自动重登」时会自动补 Code 后重试`, {
                 accountId: String(accountId),
                 accountName: worker.name,
                 source,
@@ -423,7 +442,7 @@ function createWorkerManager(options: WorkerManagerOptions) {
             });
             addAccountLog(
                 'disconnect_stop',
-                `账号 ${worker.name} 连接已断开，已停止运行并等待 Helper 刷新 Code 或重新扫码`,
+                `账号 ${worker.name} 连接已断开（${describeDisconnectSource(source, code)}），已停止运行，开启「掉线自动重登」时会自动补 Code 后重试`,
                 accountId,
                 worker.name,
                 { source, disconnectCode: code, reason, phase, connectionId: Number(msg.connectionId) || 0, diagnostics: msg.diagnostics || null },

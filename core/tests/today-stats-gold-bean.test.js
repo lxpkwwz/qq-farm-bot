@@ -223,3 +223,27 @@ test('背包同步成功直接传入余额作基线，无需等首次观测', (t
     const saved = JSON.parse(fs.readFileSync(savedFile(dataDir, 'acc-1'), 'utf8'));
     assert.equal(saved.initialState.goldBean, 800);
 });
+
+test('同日重启：金币/经验/点券基线为 null（跨天已清空）时也不恢复成 0', (t) => {
+    const dataDir = makeDataDir(t);
+    const seed = loadStats(dataDir);
+    writeSaved(dataDir, 'acc-1', {
+        date: seed.getTodayKey(),
+        operations: {},
+        initialState: { gold: null, exp: null, coupon: null, goldBean: null },
+        savedAt: 1,
+    });
+
+    const api = loadStats(dataDir);
+    api.initStatsWithPersistence('acc-1', 1000, 5000, 30);
+    const first = api.getStats({}, state(1000, 5000, 30, 800), true, {});
+    // Number(null) === 0 会通过 `>= 0` 检查，若误恢复会把整个账户余额算成今日净增。
+    assert.equal(first.sessionGoldGained, 0, 'null 基线不能被当成 0');
+    assert.equal(first.sessionExpGained, 0);
+    assert.equal(first.sessionCouponGained, 0);
+
+    const next = api.getStats({}, state(1120, 5100, 40, 850), true, {});
+    assert.equal(next.sessionGoldGained, 120);
+    assert.equal(next.sessionExpGained, 100);
+    assert.equal(next.sessionCouponGained, 10);
+});

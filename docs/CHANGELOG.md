@@ -15,6 +15,10 @@
 
 | 版本 | 更新序号 | 日期 | 更新内容 | 提交 |
 | --- | --- | --- | --- | --- |
+| v3.22.11 | #159 | 2026-11-12 | 掉线后无法自愈：补上 QQ 重登与登录失败兜底 | — |
+| v3.22.10 | #158 | 2026-11-12 | 全仓完整性复查：修复统计基线、登录初始化与若干判定缺陷 | — |
+| v3.22.9 | #157 | 2026-11-12 | 成熟唤醒与活动/好友成熟计划的时间基准修正 | — |
+| v3.22.8 | #156 | 2026-11-12 | 自家农场成熟驱动唤醒与农场调度健壮性补强 | — |
 | v3.22.7 | #155 | 2026-11-12 | 全仓完整性检查：修复六处影响统计与农场自动化的缺陷 | — |
 | v3.22.6 | #153 | 2026-11-12 | 修正调度器注释与清理帮忙间隔的无效配置读取 | — |
 | v3.22.5 | #152 | 2026-11-12 | 回滚 README 的 Docker 部署命令补全，恢复精简安装说明 | — |
@@ -163,6 +167,88 @@ flowchart TB
 ```
 
 ## 详细记录
+### 2026-11-12 · v3.22.11（#159） · 掉线后无法自愈：补上 QQ 重登与登录失败兜底
+
+**问题**：账号跑两天左右就掉线，并且一直离线；老版本能连着好几天在线。先分两件事查：掉线本身是代码问题还是登录协议过期。
+
+**协议核对（结论：协议是新的，不需要更新）**
+
+- 本地 `DEFAULT_CLIENT_VERSION` / `DEFAULT_WX_CLIENT_VERSION` = `1.16.3.8_20261028`，TSDK 为 `v3.9.0.1793764291`（微信 `v3.9.0.1793763796`），WASM SHA-256 与官方包一致。
+- 对照上游 `liyangpengs/qq-farm-bot`（2026-11-12 仍在提交）与镜像 `muyuewang/qq-farm-bot-404`（2026-11-10）：两者的客户端版本号、TSDK 版本、WASM 校验值与本地完全相同，没有更新的协议可用。11-12 的上游提交只是奶茶弹窗的样式改动，不涉及登录链路。
+- 协议过期会「直接登录失败（HTTP 400 / 版本不符）」，不会先正常在线两天再掉，所以症状形态也对不上协议失效。
+
+**代码侧根因（掉线是触发，回不来才是缺陷）**
+
+- **掉线重登只对微信生效**：`wx-keepalive.notifyAccountOffline` 的准入条件是 `hasWxCredential()`（`platform === 'wx'` 且有 `wxid + refreshtoken`），QQ 账号掉线后连「尝试重登」都不会发起，只能人工点启动。这是「掉线后一直离线」最直接的原因。
+- **登录失败直接杀进程**：`network.ts` 的 `sendLogin` 遇到 `code=` 错误走 `process.exit(0)`，而 worker-manager 的 `exit` 分支不会 `reportAccountOffline`，主进程根本收不到掉线信号，自然也不会补 Code 重登。一次性 Code 被消费、Code 过期、版本不符都会落到这条路上。
+- **掉线重登默认关闭**：`autoCodeRefresh.offlineEnabled` 默认 `false`，且归一化只看 `=== true`，老配置里没有该字段时也是关的。对「已经掉线的账号」来说这是纯自愈动作，默认关闭等于把恢复能力关掉了。
+- **QQ 重签能力判定过严**：`qq-credential` 把所有 `ok:false` 与 `LOGIN_REQUIRED` 都当成「服务不支持免扫码重签」并永久停止探测，NapCat 里 QQ 掉登录后即使重新登录也不会再试。
+
+**改动**
+
+- `core/src/services/wx-keepalive.ts`：新增 `platformOf` / `canRecoverAccount` / `refreshCredentialFor`，把「能否免扫码恢复」作为唯一准入条件 —— 微信看滚动凭证，QQ 看 NapCat 重签是否可用；`refreshAndMaybeRestart` 按平台选择 `refreshAccountCredential` 或 `tryRefreshQqGameCode`，成功后统一用新 Code 重启。新增掉线重登次数闸门 `reserveReconnectSlot`：一小时窗口最多 5 次，超了暂停 30 分钟（暂停期满重新起一轮额度），避免 Code 永久失效时每 60 秒重登一次刷屏、反复打续期接口；没有可恢复凭证时直接写清「需重新扫码」。所有尝试写入账号日志（`auto_reconnect` / `auto_reconnect_paused`）。
+- `core/src/core/worker.ts` + `core/src/utils/network.ts`：登录失败不再 `process.exit(0)`，改为 `finalizeConnection({ source: 'login_failed' })` + terminate，走正常断线收尾，让主进程按平台补 Code 后重登。
+- `core/src/runtime/worker-manager.ts`：新增 `DISCONNECT_SOURCE_LABELS`，断线与踢下线的账号日志直接写中文原因（服务端关闭连接 / 连接被拒绝 / 登录验证失败 / 心跳超时…）并带关闭码，下次掉线不用再翻英文 `source` 猜原因。
+- `core/src/services/qq-credential.ts`：`LOGIN_REQUIRED` 移出「服务不支持」永久名单（NapCat 掉登录是可恢复状态）；只有明确的能力/鉴权类错误才停止探测；临时 5xx 与网络异常不再永久禁用自愈。新增导出 `isQqCodeRefreshConfigured()`。
+- `core/src/config/config.ts`、`web/src/stores/setting.ts`、`web/src/components/settings/AccountKeepAliveCard.vue`：掉线重登默认开启；归一化只把「明确保存过的 false」当作用户主动关闭，缺省按开启处理。
+- 未改：心跳阈值（25 秒 tick / 3 次漏拍 / 60 秒极端静默）、Code 一次性不重放、扫码工作流，以及微信到期前预防性续期（仍常开、每 2 小时小幅重启一次以滚动 token）。
+
+**验证**：新增 `core/tests/qq-credential-refresh.test.js`（5 条：未配置、重签成功、明确不支持、NapCat 未登录可恢复、网络异常不永久禁用）；`core/tests/code-preflight.test.js` 扩到 25 条（QQ 掉线重签、失败不重启、限流与暂停、窗口滚动、登录失败不再杀进程、准入条件改为平台无关）。core **587→598**、web **215/215**、`pnpm lint` 0、`build:ts` / `vue-tsc -b` / `vite build` 全过。
+
+**边界**：QQ 的免扫码重签依赖 NapCat 侧 `/miniapp` 能力与当前 QQ 会话，标准 `qq-miniapp-auth` 不支持，这类账号仍只能重新扫码（日志会写明原因）；掉线触发原因（服务端关闭连接 / 心跳静默 / 网络抖动）本次只增强可见性，没有伪造握手或修改网关参数。
+
+### 2026-11-12 · v3.22.10（#158） · 全仓完整性复查：修复统计基线、登录初始化与若干判定缺陷
+
+再次按「整个代码完整性」做只读审计（4 个只读子代理分模块扫描 + 逐条回源码核实），确认并修复以下真实缺陷；对需要协议行为或产品口径才能定性的条目，核实后不盲改。
+
+- **今日统计基线被 null 误恢复成 0（最要紧）**：`stats.ts` 同日重启恢复当天基线时，`Number(null) === 0` 会通过 `>= 0` 检查，把跨天清空的 `gold/exp/coupon` 基线恢复成 0，导致「今日金币/经验/点券」直接显示成整个账户余额（金豆那段早已显式排除 null 并留了注释，金币三条是漏改的同型缺陷）。抽出 `restoreInitialBaseline()` 统一排除 null/undefined。
+- **登录成功的连接被附属初始化掐断**：`worker.ts` 的 `onLoginSuccess` 里 `initStatsWithPersistence / processInviteCodes / syncStatus` 等未包 try/catch，而 network 的 `sendLogin` 会把 `onLoginSuccess` 抛错当成「登录初始化失败」直接 finalize + terminate。任一附属步骤（统计落盘失败、邀请码接口抖动）都可能把刚登录好的健康连接杀掉，形成「登录成功→立刻掉线→重启」循环。改为逐段兜底 + logWarn（作者在 `runStartupSequence` 注释里已明说该风险，中段漏做）。
+- **2×2 催熟结果没带出返回值**：`planting.ts` 的 `runFertilizerByConfig` 只在 `multi_season && none` 分支返回 `size2` 计数，常规「2×2 催熟开 + 施肥 none/smart」下返回 0，scheduler 因此不立即收获刚催熟的地块（多等一轮约 20-25s，正落在最易被偷的窗口），日志也没有「2×2催熟」痕迹。改为统一返回 `fertilized + size2`；并给 smart 有机目标补上排除 2×2 主地块，避免重复施肥。
+- **出售数量在 gold=0 时漏记**：`worker.ts` 的 `onSellGain` 用 `sellInfo.gold || sellInfo`，gold 为 0 时回落成对象、`Number(obj)` 得 NaN 直接 return，`recordOperation('sell')` 丢失。改为只认 `count`。
+- **调度器旧 interval 任务改写新任务状态**：`scheduler.ts` 的 `setIntervalTask` finally 只用 key 取 entry，任务被 clear 后重建（如保存配置重建神秘商店定时器）时，仍在跑的旧 runner 会把新 entry 的 `running` 清掉、`nextRunAt` 覆盖，导致防重入失效。补代际校验 `updated === entry`（`setTimeoutTask` 早已有同类校验）。
+- **末季多季作物被误判仍在生长**：`land-analysis.ts` 的 `hasRemainingSeasons` 写成 `currentSeason > 1 || currentSeason < totalSeason`，前一项与「是否有剩余季」无关且恒把末季判真，导致异常阶段下的末季作物被当 growing（跳过铲除、还对其补肥）。改为 `currentSeason < totalSeason`。
+- **有机肥目标混入成熟地块**：`getOrganicFertilizerTargetsFromLands` 只排除枯死、不排除成熟（普通肥版本已排除），成熟地块排在前面会让「第一块不能施」中断整轮有机肥。补 MATURE 排除。
+- **神秘商店缺字段被当有效商品**：`decideMysteryShopTick` 用 `Number(npc.reward.count) <= 0` 判无效，字段缺失时 `NaN <= 0` 为 false，会被当成有效商品继续下单。改为 `!(Number(...) > 0)`。
+- **图鉴自动化一次失败吃掉一整天**：`illustrated-auto.ts` 在干活前就把 `lastRunDate` 置成今天，`getSnapshot`/`getBagSeeds` 抛错后当天后续调用全返回 `same_day`。改为真正跑完才标记，基础设施失败可当天重试。
+- **`/api/automation` 空 body 500**：`farm-routes.ts` 直接 `Object.entries(req.body)`，`Content-Type` 不匹配时 `req.body` 为 undefined → TypeError → 500。补请求体守卫，空配置返回 400。
+- **前端三处**：好友土地请求序号原来是全账号共享计数器，「展开 A 后立刻展开 B」会把 A 的结果丢弃且 A 的 loading 永真 → 改为按好友维度（Map）；账号列表请求失败不再清空 `accounts`/`currentAccountId`（原来一次超时就会静默把选中账号重置成第一个）；活动倒计时新增未知 state 的兜底文案（原会渲染成 `undefined`）。
+
+核实后未改（避免盲改）：`mall.ts`/`pet-feed.ts` 读 `getUserState().ticket` 恒为 0，但商城商品计价币种是动态的 `goods.price.id`，不是固定点券，简单换成 `coupon` 会在币种不同时误暂停购买，留待「按币种取背包余额」的方案；`pet-feed` 自动买礼包失败后提前 return（与开关关闭分支语义不一致，属产品取舍）；`email` 批量领取回包被丢弃与 `nextCheckAt` 服务器分钟/本地毫秒混算；`task` 图鉴用点券差值 ≥200 判成功；`network` 登录业务错误码直接 `process.exit(0)` 不上报（涉及连接生命周期，改动面大）。
+
+验证：core **575→587**（+12）、web **212→215**（+3）、`pnpm lint` 0、core `build:ts`、`vue-tsc -b`、`vite build` 全过。
+
+### 2026-11-12 · v3.22.9（#157） · 成熟唤醒与活动/好友成熟计划的时间基准修正
+
+再次按「整个代码完整性」做了一轮只读审计，重点核对 v3.22.8 新增的「自家农场成熟驱动唤醒」链路与全仓其它时间计算路径。发现并修复三处同一根因的缺陷：把「服务器时间」和「本地 Date.now()」混用做时长 / 延迟计算，一旦本机时钟与服务器时钟不一致（项目本就为这种偏移维护了 syncServerTime），唤醒线或开关节点会被错算。
+
+- **自家成熟延迟按服务器时间计算（最要紧）**：`own-maturity.ts` 的 `getOwnFarmMaturityDelayMs` 原来用 `matureAtSec*1000`（服务器时间戳）去减本地 `Date.now()`，算出「还要等多久」。服务器比本地快 30 秒时，本应 10 秒后收的菜会被算成还要等约 40 秒，唤醒点跟着漂。现在改成纯服务器时间差 `(matureAtSec - getServerTimeSec())*1000`，与好友成熟计划 `nowMs + (matureAt - nowSec)*1000` 同一口径；`worker.ts` 调用处同步去掉已无意义的本地 nowMs 入参。
+- **活动开放判定按服务器时间**：`activity-automation.ts` 的 `isActivityOpen` 在 DTO 不带 active 字段、只能按 endTime 兜底判定时，用了 `Math.floor(Date.now()/1000)`（本地秒），而同文件 `buildActivityWindowGate` / `rescheduleActivityEventTimers` 都按 `getServerTimeSec()`。青酿 / 七夕 / 公益等活动的开放与关闭边界因此会按本机时钟算，可能向已关闭活动发请求或漏领。改为 `getServerTimeSec()`。
+- **好友成熟计划的过期清理按服务器时间**：`maturity-plan.ts` 的 `pruneExpiredPlans` 把服务器秒级的 `plan.matureAt` 和调用方传入的本地 `Date.now()`（nowMs）混在一起比，其余全部成熟数学（findNearestFutureMaturity / getNextStealDelayMs / observeFriendSummary 的 matureAt 比较）都正确用服务器时间。改成用 `getServerTimeSec()` 折算，调用方不再把本地 nowMs 喂进去。
+
+补的回归测试：
+- `core/tests/farm-scheduler-enhancements.test.js` 新增一条**真跑**用例：用 `syncServerTime` 把服务器时钟模拟得比本地快 30 秒，注入一个「服务器视角 10 秒后成熟」的墙钟，断言 `getOwnFarmMaturityDelayMs` 返回约 10 秒而非约 40 秒，锁死时间基准。
+- `core/tests/maturity-plan.test.js` 新增一条结构锁：源码不再出现 `plan.matureAt * 1000 <= nowMs - DUE_GRACE_MS`，必须是 `nowSec * 1000 - DUE_GRACE_MS`。
+- `core/tests/activity-automation.test.js`（新文件）新增一条结构锁：`isActivityOpen` 体内不再用 `Math.floor(Date.now()/1000)`，必须出现 `getServerTimeSec()`。
+
+审查中另有两项**存疑、未改**：
+- `commerce.ts` 的 `purchaseMysteryOffer` 购买成功后的确认判断里，`reward.count` 来自静态的 `npc.reward_count`，购买并不递减它，所以「`shop.npc.reward.count >= offer.reward.count`」在买成功后仍为真，理论上每次成功购买都会被判「未确认」并抛错、购买历史也写不进去。但这一判据真正能否触发取决于神秘商人购买后 `is_active` 是否翻转——这是协议回包层面的行为，本机无法验证，盲改购买路径风险更高，因此本次不动，仅标记为待线上确认。
+- `capital-mode.ts` 的 `findNearestMatureSeconds` 用 `toTimeSec(begin_time)` 取成熟点。`toTimeSec` 只做毫秒→秒归一、不处理相对倒计时，若服务端对 phase 的 `begin_time` 下发相对值会被当成绝对时间戳。但全仓 `land-analysis.ts` / `ripen-all.ts` / `reservation-window.ts` 都用 `toTimeSec(begin_time) - getServerTimeSec()` 这一绝对时间口径，属既有统一约定，故不改（避免破坏既有正确假设）。
+
+验证：core 575/575（较上轮 +3，来自新增回归用例）、web 212/212（web 未改动，沿用上轮基线）、`pnpm lint` 0 警告、core `build:ts` 全过。服务器 / NAS 环境配置未改动；这些改动要在 NAS 生效仍需走一次一键更新重新构建。
+
+### 2026-11-12 · v3.22.8（#156） · 自家农场成熟驱动唤醒与农场调度健壮性补强
+
+把上一轮只读分析里点名、当时按「没要求就不改」留着的增强项全部落地，另外清掉工作树里唯一的未跟踪文件。行为上只让巡查更及时、更不容易被卡住，没有改任何开关语义、协议请求或数据落盘。
+
+- **自家农场改为成熟驱动唤醒（最要紧）**：以前只有好友偷菜按成熟时刻动态排程，自家农场永远是 20~25 秒随机轮询，作物熟了平均还要白等十几秒。现在新增 `own-maturity.ts`：每轮整片土地快照用与好友成熟计划同口径的 `phase=6 / phase_id=19` 的 `begin_time` 算出下一块作物的成熟墙钟（兼容绝对秒 / 毫秒 / 相对倒计时），土地变更推送也参与观察但只收紧、不清空；`worker.ts` 的 `planNextFarmRun` 把下一次到期线取 `min(常规间隔, 成熟点 + 1.5 秒缓冲)`。成熟点过了 90 秒仍没被刷新就作废，避免一次没收成的旧墙钟把唤醒永久钉在最小值。
+- **配置下发不再「叫不醒」农场线**：统一调度器模式下 `refreshFarmCheckLoop(200)` 会因为 `scheduleNextFarmCheck` 直接 return 而什么也不做，面板保存配置后农场要等满 20~25 秒。现在该分支登记一次唤醒请求，`resetUnifiedSchedule` 与农场 tick 结束都统一走 `planNextFarmRun`，有请求就把到期线拉到 200ms 后。巡查中攒下的推送、收获失败、整轮超时也走同一条「尽快补跑」通道，一分钟内最多 3 次，防止推送风暴把常规节奏改成 1 秒空转。
+- **两类土地推送不再互相挤掉**：原先土地变化与农场社交事件共用一个 `lastPushTime`，还共用一个 `farm_push_check` 计时器名（`setTimeoutTask` 同名会先清掉旧计时器），同时到达时后者会把前者的检查整个抹掉。现在拆成两条独立的节流时间戳与两个计时器名；巡查进行中或计时器落地时撞上巡查的推送不再无声丢弃，改为记脏标记，等本轮结束立刻补跑一轮。
+- **自动化锁补优先级与排队超时**：`automation-lock.ts` 由 Promise 尾链改为显式等待队列，串行语义与「持锁内联 / detached 重新排队」完全不变，但农场巡查与推送补跑可以带 `priority` 插到所有低优先任务之前（不打断正在执行的任务），不再被排队中的卖果、活动自动化等长任务挡住；`timeoutMs` 只管「排队等锁」这一段，超时就跳过本轮并记日志（30 秒节流），已经开始执行的任务不受影响。
+- **整轮软预算与失败快速重试**：自动巡田带 5 分钟整轮预算，在种植、解锁升级、巡田施肥三个阶段的边界检查，超预算就停在边界、剩余动作交下一轮并登记补跑，不让一次慢请求或长施肥循环无限期占住链路；`Harvest` 失败被 catch 吞掉后本轮不铲不种，现在同样登记一次补跑，1 秒级重试而不是等 20~25 秒。
+- **工作树清理**：`qq-farm-bot/.workbuddy/` 里那份本机工作日志副本此前未跟踪、也没被忽略，现在在 `.gitignore` 加 `.workbuddy/` 规则。文件本身保留不删，只是不再出现在 `git status`、也不会被误提交或带到 NAS 的 `git pull` 工作区。
+- **回归测试**：新增 `core/tests/farm-scheduler-enhancements.test.js` 20 条，其中成熟墙钟归一化 / 最近成熟点 / 计划收紧与作废 / 补跑限流、`planNextFarmRun` 四种到期线（vm 沙箱注入桩真跑）、锁的优先级插队与排队超时、超时后队列仍可用都是**真实执行**，其余为防止改回旧写法的结构锁（两条到期线都走 `planNextFarmRun`、两类推送各自节流、脏标记、external 模式唤醒、三处预算检查等）。
+- **验证**：core 572/572、web 212/212、`pnpm lint` 0 警告、core `build:ts`、`vue-tsc -b`、`vite build` 全过。服务器 / NAS 环境配置未改动；这些改动要在 NAS 生效仍需走一次一键更新重新构建。
+
 ### 2026-11-12 · v3.22.7（#155） · 全仓完整性检查：修复六处影响统计与农场自动化的缺陷
 
 对仓库做了一轮完整性体检：全量测试、lint、三个构建先跑基线（全绿），再分两路只读审查核心调度链与其余模块，逐条核实到代码行后只修确认的缺陷，不采纳风格建议与误报。共修复六处，另补一处可观测性改进。

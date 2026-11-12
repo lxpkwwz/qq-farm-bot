@@ -57,8 +57,15 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
         }
 
         try {
+            // express.json() 在 Content-Type 不匹配时不解析，req.body 可能是 undefined，
+            // 直接 Object.entries(undefined) 会抛 TypeError 变成 500。
+            const body = (req.body && typeof req.body === 'object' && !Array.isArray(req.body)) ? req.body : {};
+            const entries = Object.entries(body);
+            if (entries.length === 0) {
+                return res.status(400).json({ ok: false, error: '缺少要更新的配置项' });
+            }
             let lastData = null;
-            for (const [k, v] of Object.entries(req.body)) {
+            for (const [k, v] of entries) {
                 lastData = await ctx.provider.setAutomation(id, k, v);
             }
             res.json({ ok: true, data: lastData || {} });

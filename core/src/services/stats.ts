@@ -228,6 +228,13 @@ function initStats(gold: number, exp: number, coupon: number = 0, goldBean: numb
     runInitial.coupon = c;
 }
 
+/** 从存档恢复当日基线：null/undefined（跨天清空）视为「不恢复」，交给登录基线重算。 */
+function restoreInitialBaseline(raw: any): number | null {
+    if (raw === null || raw === undefined) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
 function initStatsWithPersistence(accountId: string, gold: number, exp: number, coupon: number = 0, goldBean: number | null = null): void {
     currentAccountId = accountId;
     const todayKey: string = getTodayKey();
@@ -256,21 +263,16 @@ function initStatsWithPersistence(accountId: string, gold: number, exp: number, 
     // 金币/经验当日增量跨重启继续累计，不从头算。
     if (saved && saved.date === todayKey) {
         const savedInitial = saved.initialState || {};
-        const restoredGold = Number(savedInitial.gold);
-        const restoredExp = Number(savedInitial.exp);
-        const restoredCoupon = Number(savedInitial.coupon);
-        if (Number.isFinite(restoredGold) && restoredGold >= 0)
-            initialState.gold = restoredGold;
-        if (Number.isFinite(restoredExp) && restoredExp >= 0)
-            initialState.exp = restoredExp;
-        if (Number.isFinite(restoredCoupon) && restoredCoupon >= 0)
-            initialState.coupon = restoredCoupon;
-        // 金豆基线：旧存档没有该字段，或基线仍为空时保持 null 交给首次观测。
-        // 必须显式排除 null/undefined —— Number(null) === 0 会通过上面的常规检查。
-        const restoredGoldBean = savedInitial.goldBean;
-        if (restoredGoldBean !== null && restoredGoldBean !== undefined
-            && Number.isFinite(Number(restoredGoldBean)) && Number(restoredGoldBean) >= 0)
-            initialState.goldBean = Number(restoredGoldBean);
+        // 必须显式排除 null/undefined：Number(null) === 0 会通过「>= 0」检查，
+        // 把跨天清空的基线误恢复成 0，导致面板「今日收益」显示成整个账户余额。
+        const restoredGold = restoreInitialBaseline(savedInitial.gold);
+        const restoredExp = restoreInitialBaseline(savedInitial.exp);
+        const restoredCoupon = restoreInitialBaseline(savedInitial.coupon);
+        const restoredGoldBean = restoreInitialBaseline(savedInitial.goldBean);
+        if (restoredGold !== null) initialState.gold = restoredGold;
+        if (restoredExp !== null) initialState.exp = restoredExp;
+        if (restoredCoupon !== null) initialState.coupon = restoredCoupon;
+        if (restoredGoldBean !== null) initialState.goldBean = restoredGoldBean;
     }
 }
 

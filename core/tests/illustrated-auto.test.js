@@ -151,3 +151,17 @@ test('每日自动化挂载在 worker 每日例行，开关由关变开保存后
     assert.match(defaults, /illustrated_auto_buy_missing_seeds: false/);
     assert.match(defaults, /illustrated_buy_skip_bag: true/);
 });
+
+test('每日图鉴：getSnapshot 抛错时不标记当天已跑，后续调用可重试', async () => {
+    resetIllustratedDailyAutomation();
+    const failing = makeDeps({
+        getSnapshot: async () => { throw new Error('网关繁忙'); },
+    });
+    const first = await runIllustratedDailyAutomation(false, failing);
+    assert.notEqual(first.skipped, 'same_day', '失败不应被当成当天已完成');
+
+    // 基础设施恢复后，同一天应能继续执行，而不是被 same_day 挡住一整天。
+    const second = await runIllustratedDailyAutomation(false, makeDeps());
+    assert.notEqual(second.skipped, 'same_day', '一次基础设施失败不应吃掉一整天');
+    resetIllustratedDailyAutomation();
+});

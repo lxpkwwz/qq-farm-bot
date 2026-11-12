@@ -187,3 +187,15 @@ test('checkMysteryShopTick buys once and returns a merged push', async () => {
     assert.equal(second.bought, true);
     assert.equal(second.push, undefined);
 });
+
+test('reward.count 缺失（NaN）视为无效商品，不误判为可买', () => {
+    const auto = automation({ mystery_shop_auto_buy: true });
+    const missing = decideMysteryShopTick({
+        active: true,
+        activeTime: 1_700_000_000_000,
+        npc: { id: 7, reward: { id: 20001, name: '艾草种子' }, price: { id: GOLD_ITEM_ID, count: 48000, balance: 100000 } },
+    }, auto);
+    assert.equal(missing.skipReason, 'inactive');
+    assert.equal(missing.shouldBuy, false);
+    assert.equal(missing.notifyArrival, false);
+});

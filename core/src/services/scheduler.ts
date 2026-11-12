@@ -231,7 +231,9 @@ function createScheduler(namespace = 'default'): Scheduler {
                 });
             } finally {
                 const updated = timers.get(key);
-                if (updated) {
+                // 代际校验：任务被 clear 后重新注册（如保存配置重建定时器）时，
+                // 仍在执行的旧 runner 不得改写新 entry 的 running / nextRunAt。
+                if (updated === entry) {
                     updated.running = false;
                     updated.nextRunAt = Date.now() + delay;
                 }

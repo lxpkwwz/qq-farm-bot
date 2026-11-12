@@ -1507,6 +1507,10 @@ async function runFertilizerByConfig(plantedLands: any[] = [], options: { skipNo
             if (options.propagateErrors) throw e;
         }
 
+        // 2×2 主地块已由上面的催熟流程单独施过有机肥，这里排除，避免重复施肥与重复计数。
+        if (excludedIds.size > 0) {
+            organicTargets = organicTargets.filter((id: number) => !excludedIds.has(id));
+        }
         if (organicTargets.length > 0) {
             fertilizedOrganic = await fertilizeOrganicLoop(organicTargets, options.propagateErrors);
             if (fertilizedOrganic > 0) {
@@ -1522,12 +1526,13 @@ async function runFertilizerByConfig(plantedLands: any[] = [], options: { skipNo
         }
     }
 
-    if (reason === 'multi_season' && fertilizerConfig === 'none') {
-        // 多季补肥只在有施肥策略时生效；开启 2x2 催熟时上一段已单独处理，直接返回。
-        return { normal: size2NormalCount, organic: size2OrganicCount };
-    }
-
-    return { normal: fertilizedNormal, organic: fertilizedOrganic };
+    // 2×2 催熟结果必须一并带出：scheduler 依赖返回值决定是否立刻收获刚催熟的地块。
+    // normalTargets（1367 行）与 organicTargets（1478 行）都已排除 excludedIds（2×2 主地块），
+    // 因此 fertilizedNormal/Organic 与 size2 计数互斥，相加不会重复计数。
+    return {
+        normal: fertilizedNormal + size2NormalCount,
+        organic: fertilizedOrganic + size2OrganicCount,
+    };
 }
 
 async function fertilizeOwnLand(landIdInput: unknown, fertilizerTypeInput: unknown): Promise<any> {

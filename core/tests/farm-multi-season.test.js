@@ -219,3 +219,29 @@ test('filterLandIdsForNormalFertilizer keeps unknown empties and drops exhausted
     ];
     assert.deepEqual(filterLandIdsForNormalFertilizer([1, 2, 3, 99], lands), [1, 3, 99]);
 });
+
+test('getOrganicFertilizerTargetsFromLands 排除已成熟地块', () => {
+    const now = Math.floor(Date.now() / 1000);
+    const lands = [
+        land(1, { id: RADISH_ID, season: 1, phases: growingPhases(now) }),
+        land(2, { id: RADISH_ID, season: 1, phases: [{ phase: PlantPhase.MATURE, begin_time: now - 10 }] }),
+    ];
+    assert.deepEqual(getOrganicFertilizerTargetsFromLands(lands), [1]);
+});
+
+test('classifyHarvestedLandsByMap: 末季多季作物遇到异常阶段判 unknown，不再误判 growing', () => {
+    const now = Math.floor(Date.now() / 1000);
+    const map = new Map([
+        [8, land(8, {
+            id: MUSHROOM_ID,
+            season: 2, // MUSHROOM 共 2 季，这是末季：没有剩余季
+            phases: [
+                { phase: 20, phase_id: 20, begin_time: now - 10 },
+                { phase: PlantPhase.MATURE, begin_time: now + 3600 },
+            ],
+        })],
+    ]);
+    const result = classifyHarvestedLandsByMap([8], map);
+    assert.deepEqual(result.growing, [], '末季不应再被当成还有下一季的生长中作物');
+    assert.deepEqual(result.unknown, [8]);
+});

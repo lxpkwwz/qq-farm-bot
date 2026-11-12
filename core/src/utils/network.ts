@@ -1014,9 +1014,12 @@ async function sendLogin(context: ConnectionContext, onLoginSuccess?: () => void
         if (err) {
             log('登录', `失败: ${err.message}`);
             if (err.message.includes('code=')) {
-                log('系统', '账号验证失败，即将停止运行...');
-                networkScheduler.setTimeoutTask('login_error_exit', 1000, () => process.exit(0));
+                // 一次性 Code 被拒（已被消费 / 过期 / 版本不符）时不要把进程直接杀掉：
+                // 走正常的断线收尾，让主进程拿到 account_disconnected，按平台补 Code 后重登。
+                log('系统', '账号验证失败，交由主进程补 Code 后重试登录...');
             }
+            finalizeConnection(context, { source: 'login_failed', reason: err.message });
+            try { (context.socket as any).terminate(); } catch {}
             return;
         }
 

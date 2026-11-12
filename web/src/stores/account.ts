@@ -127,9 +127,10 @@ export const useAccountStore = defineStore('account', () => {
       console.error('获取账号失败', e)
       if (sequence !== accountsRequestSequence)
         return
-      // 请求失败时也清空状态
-      accounts.value = []
-      currentAccountId.value = ''
+      // 网络/超时类失败保留上一份账号快照，不要清空。
+      // 原实现任何异常都清空 accounts + currentAccountId，会连带把用户选中的账号
+      // 重置成第一个（下一次轮询成功后自动选 accounts[0]），表现为「页面自己跳账号」。
+      // 真正的「无账号/未登录」由成功响应里的空列表分支处理。
     }
     finally {
       if (sequence === accountsRequestSequence)

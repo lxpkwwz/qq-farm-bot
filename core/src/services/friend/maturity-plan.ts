@@ -77,9 +77,12 @@ function updatePlan(gid: number, patch: Partial<MaturityPlan>): MaturityPlan {
  * 清理过期计划：到期超过宽限期的成熟点不再参与唤醒。
  * 否则一次没偷成的旧墙钟会永久把动态唤醒钉在最小值。
  */
-function pruneExpiredPlans(nowMs: number = Date.now()): void {
+function pruneExpiredPlans(): void {
+    // plan.matureAt 是 normalizeAbsoluteTime 按服务器时间折算的秒级墙钟，必须和服务器当下时间比，
+    // 不能拿调用方传入的本地 Date.now()（nowMs）当分母，否则本机/服务器时钟一偏就会在错误时刻清零或滞留。
+    const nowSec = getServerTimeSec();
     for (const plan of plans.values()) {
-        if (plan.matureAt > 0 && plan.matureAt * 1000 <= nowMs - DUE_GRACE_MS) {
+        if (plan.matureAt > 0 && plan.matureAt * 1000 <= nowSec * 1000 - DUE_GRACE_MS) {
             plan.matureAt = 0;
             plan.source = 'expired';
         }
@@ -89,7 +92,7 @@ function pruneExpiredPlans(nowMs: number = Date.now()): void {
 export function observeFriendSummary(friend: any, nowMs: number = Date.now(), nowSec: number = getServerTimeSec()): void {
     const gid = toNum(friend && friend.gid);
     if (!gid) return;
-    pruneExpiredPlans(nowMs);
+    pruneExpiredPlans();
     const plant = (friend && friend.plant) || {};
     const matureAt = normalizeAbsoluteTime(plant.ripe_time_sec, nowSec);
     updatePlan(gid, {
@@ -110,7 +113,7 @@ export function observeFriendLands(
     const nowMs = Number(options.nowMs) || Date.now();
     const nowSec = Number(options.nowSec) || getServerTimeSec();
     const source = String(options.source || 'lands');
-    pruneExpiredPlans(nowMs);
+    pruneExpiredPlans();
     const observedMatureAt = findNearestFutureMaturity(lands, nowSec);
     const currentMatureAt = plans.get(gid)?.matureAt || 0;
     // 部分来源（通知/收获回包）不做整片覆盖，只收紧到更早的已知值。

@@ -10,14 +10,14 @@ export interface ActivityCheckStatus {
  * 数据来自 worker 的 nextChecks.milkTea，未开启任何奶茶自动化时返回 disabled。
  */
 export function milkTeaCountdown(check: ActivityCheckStatus | undefined, now: number) {
-  const labels = { upcoming: '未开始', ended: '已结束', disabled: '未开启', paused: '已暂停', running: '检查中...', idle: '等待调度' }
+  const labels: Record<string, string> = { upcoming: '未开始', ended: '已结束', disabled: '未开启', paused: '已暂停', running: '检查中...', idle: '等待调度' }
   const description = check?.enabledActionCount
     ? `已开启 ${check.enabledActionCount} 项 · 每 ${Math.max(1, Math.round(check.intervalSec / 60))} 分钟`
     : '奶茶热销中'
   if (!check)
     return { time: '等待同步', progress: 0, description }
   if (check.state !== 'scheduled')
-    return { time: labels[check.state], progress: 0, description }
+    return { time: labels[check.state] ?? '等待调度', progress: 0, description }
   if (!Number.isFinite(check.nextRunAt) || check.nextRunAt === null)
     return { time: '等待调度', progress: 0, description }
   const seconds = Math.max(0, Math.ceil((check.nextRunAt - now) / 1000))

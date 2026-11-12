@@ -14,6 +14,8 @@ module.exports = {
     startFarmCheckLoop: scheduler.startFarmCheckLoop,
     stopFarmCheckLoop: scheduler.stopFarmCheckLoop,
     refreshFarmCheckLoop: scheduler.refreshFarmCheckLoop,
+    getOwnFarmMaturityDelayMs: scheduler.getOwnFarmMaturityDelayMs,
+    consumeFarmWakeup: scheduler.consumeFarmWakeup,
     getCurrentPhase: landAnalysis.getCurrentPhase,
     buildLandDetail: landAnalysis.buildLandDetail,
     getPlantStatusFlags: landAnalysis.getPlantStatusFlags,

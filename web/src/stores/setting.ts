@@ -352,7 +352,7 @@ function createDefaultSettings(): SettingsState {
     intervals: {},
     friendQuietHours: { enabled: false, start: '23:00', end: '07:00', continueFarm: true },
     automation: {},
-    autoCodeRefresh: { offlineEnabled: false, offlineDelaySeconds: 60 },
+    autoCodeRefresh: { offlineEnabled: true, offlineDelaySeconds: 60 },
     friendMonitor: createDefaultFriendMonitor(),
     ui: {},
     offlineReminder: createDefaultOfflineReminder(),

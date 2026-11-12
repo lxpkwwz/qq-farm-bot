@@ -14,7 +14,7 @@ interface OnlineConfig {
 
 const emit = defineEmits<{ notify: [message: string, type?: 'primary' | 'danger'] }>()
 
-const DEFAULT_CONFIG: OnlineConfig = { offlineEnabled: false, offlineDelaySeconds: 60 }
+const DEFAULT_CONFIG: OnlineConfig = { offlineEnabled: true, offlineDelaySeconds: 60 }
 
 const config = ref<OnlineConfig>({ ...DEFAULT_CONFIG })
 const draft = ref<OnlineConfig>({ ...DEFAULT_CONFIG })
@@ -38,7 +38,9 @@ function normalize(input: any): OnlineConfig {
   const src = (input && typeof input === 'object') ? input : {}
   const delay = Number(src.offlineDelaySeconds)
   return {
-    offlineEnabled: src.offlineEnabled === true,
+    offlineEnabled: src.offlineEnabled === undefined || src.offlineEnabled === null
+      ? true
+      : src.offlineEnabled === true,
     offlineDelaySeconds: Number.isFinite(delay) ? Math.max(1, Math.min(86400, Math.round(delay))) : DEFAULT_CONFIG.offlineDelaySeconds,
   }
 }

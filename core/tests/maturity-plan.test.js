@@ -122,3 +122,9 @@ test('getNextStealDelayMs clamps and falls back with no plans', () => {
     observeFriendSummary({ gid: 4, plant: { ripe_time_sec: 86400 * 30 } }, NOW_MS, NOW_SEC);
     assert.equal(getNextStealDelayMs({ nowMs: NOW_MS, nowSec: NOW_SEC, fallbackMs: 900_000 }), 900_000);
 });
+
+test('静态锁：pruneExpiredPlans 按服务器时间清过期计划，不混用本地 Date.now()', () => {
+    const src = fs.readFileSync(path.resolve(__dirname, '../src/services/friend/maturity-plan.ts'), 'utf8');
+    assert.doesNotMatch(src, /plan\.matureAt \* 1000 <= nowMs - DUE_GRACE_MS/, '不能拿本地 nowMs 减宽限期');
+    assert.match(src, /plan\.matureAt \* 1000 <= nowSec \* 1000 - DUE_GRACE_MS/, '必须用服务器 nowSec 折算');
+});

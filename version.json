@@ -1,12 +1,44 @@
 {
   "major": 3,
   "minor": 22,
-  "patch": 7,
-  "build": 155,
-  "version": "3.22.7",
-  "updatedAt": "2026-11-12T03:01:04.840Z",
+  "patch": 11,
+  "build": 159,
+  "version": "3.22.11",
+  "updatedAt": "2026-11-12T12:09:48.624Z",
   "lastCommit": "—",
   "history": [
+    {
+      "version": "3.22.11",
+      "build": 159,
+      "date": "2026-11-12",
+      "summary": "掉线后无法自愈：补上 QQ 重登与登录失败兜底",
+      "commit": "—",
+      "type": "patch"
+    },
+    {
+      "version": "3.22.10",
+      "build": 158,
+      "date": "2026-11-12",
+      "summary": "全仓完整性复查：修复统计基线、登录初始化与若干判定缺陷",
+      "commit": "—",
+      "type": "patch"
+    },
+    {
+      "version": "3.22.9",
+      "build": 157,
+      "date": "2026-11-12",
+      "summary": "成熟唤醒与活动/好友成熟计划的时间基准修正",
+      "commit": "—",
+      "type": "patch"
+    },
+    {
+      "version": "3.22.8",
+      "build": 156,
+      "date": "2026-11-12",
+      "summary": "自家农场成熟驱动唤醒与农场调度健壮性补强",
+      "commit": "—",
+      "type": "patch"
+    },
     {
       "version": "3.22.7",
       "build": 155,

@@ -13,7 +13,7 @@ test('定时重登开关与配置字段全部下线', () => {
   assert.doesNotMatch(card, /定时重登|intervalMinutes|draft\.enabled|config\.value\.enabled/)
   assert.doesNotMatch(config, /enabled: src\.enabled|intervalMinutes: Number\.isFinite/)
   assert.doesNotMatch(config, /autoCodeRefresh: \{ enabled:/)
-  assert.match(config, /autoCodeRefresh: \{ offlineEnabled: false, offlineDelaySeconds: 60 \}/)
+  assert.match(config, /autoCodeRefresh: \{ offlineEnabled: true, offlineDelaySeconds: 60 \}/, '掉线重登默认开启（只在掉线后才动作）')
   assert.match(config, /旧 store\.json 里的 enabled \/ intervalMinutes 会被直接丢弃/)
 })
 

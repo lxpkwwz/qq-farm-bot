@@ -96,8 +96,10 @@ async function runIllustratedDailyAutomation(force: boolean = false, injection: 
     }
 
     running = true;
-    lastRunDate = today;
     const result: any = { date: today, claimed: [], bought: [], failed: [] };
+    // 只有真正跑完（含单项失败）才标记「当天已跑」。外层 getSnapshot/getBagSeeds 抛错时
+    // 保持未标记，当天后续调用可以重试，避免一次基础设施失败就吃掉一整天。
+    let completed = false;
     try {
         const snapshot = await deps.getSnapshot();
         if (claimEnabled) {
@@ -141,6 +143,7 @@ async function runIllustratedDailyAutomation(force: boolean = false, injection: 
                 count: result.bought.length, failed: result.failed.length,
             });
         }
+        completed = true;
     }
     catch (e: any) {
         deps.logWarn('图鉴', `每日图鉴自动化检查失败：${e.message}`, {
@@ -149,6 +152,7 @@ async function runIllustratedDailyAutomation(force: boolean = false, injection: 
     }
     finally {
         running = false;
+        if (completed) lastRunDate = today;
     }
     return result;
 }

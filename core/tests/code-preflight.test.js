@@ -21,6 +21,8 @@ const mocks = {
     preflightResults: [],
     systemConfig: null,
     refreshImpl: null,
+    qqConfigured: true,
+    qqRefreshImpl: null,
 };
 
 const storeMock = {
@@ -36,10 +38,18 @@ const wxCredentialMock = {
     refreshAccountCredential: async id => mocks.refreshImpl(id),
 };
 
+// QQ 没有滚动凭证，掉线重登走 NapCat 免扫码重签；这里给一个可控的假实现。
+const qqCredentialMock = {
+    isQqCodeRefreshConfigured: () => mocks.qqConfigured,
+    tryRefreshQqGameCode: async id => mocks.qqRefreshImpl(id),
+    resetQqCodeRefreshState: () => {},
+};
+
 const originalLoad = Module._load;
 Module._load = function (request, parent, isMain) {
     if (request === '../models/store') return storeMock;
     if (request === './wx-credential') return wxCredentialMock;
+    if (request === './qq-credential') return qqCredentialMock;
     return originalLoad.call(this, request, parent, isMain);
 };
 
@@ -65,6 +75,18 @@ function wxAccount(patch = {}) {
     };
 }
 
+function qqAccount(patch = {}) {
+    return {
+        id: '9',
+        name: 'QQ 一号',
+        platform: 'qq',
+        uin: '10001',
+        qq: '10001',
+        code: 'old-code',
+        ...patch,
+    };
+}
+
 function reset() {
     mocks.accounts = [];
     mocks.running = new Set();
@@ -73,7 +95,9 @@ function reset() {
     mocks.printed = [];
     mocks.preflightResults = [];
     mocks.systemConfig = null;
+    mocks.qqConfigured = true;
     mocks.refreshImpl = async id => ({ ok: true, accountId: id, accountName: '微信一号' });
+    mocks.qqRefreshImpl = async id => ({ ok: true, code: 'new-code', accountId: id });
     ka.stopWxKeepAlive(); // 清掉定时器、inFlight 与熔断计数
     ka.startWxKeepAlive({
         isAccountRunning: id => mocks.running.has(id),
@@ -159,7 +183,7 @@ test('governor：连续 12 次成功不消耗任何日额度', () => {
     assert.equal(g.canAttempt('s', NOW + 12 * 6 * MINUTE + 6 * MINUTE), true);
 });
 
-test('后端自主：掉线重登默认关闭时，到期账号仍会续期并重启', async () => {
+test('后端自主：掉线重登默认开启，到期账号仍会续期并重启', async () => {
     reset();
     const acc = wxAccount({ expires_at: NOW + 20 * MINUTE });
     mocks.accounts = [acc];
@@ -168,7 +192,7 @@ test('后端自主：掉线重登默认关闭时，到期账号仍会续期并�
         acc.expires_at = NOW + 2 * HOUR + 20 * MINUTE; // 模拟滚动续期写回新到期时间
         return { ok: true, accountId: id, accountName: '微信一号' };
     };
-    assert.equal(ka.getConfig().offlineEnabled, false, '系统配置默认关闭掉线重登');
+    assert.equal(ka.getConfig().offlineEnabled, true, '系统配置默认开启掉线重登（只在掉线后动作）');
     assert.equal('enabled' in ka.getConfig(), false, '定时重登开关已整体移除');
     assert.deepEqual(await ka.runCodePreflight(NOW), ['1']);
     assert.deepEqual(mocks.restarts, ['1'], '运行中账号立刻用新 Code 重新上线');
@@ -317,4 +341,80 @@ test('Code 失效信号：ws_400（worker 实际写入）与预防续期失败�
     assert.ok(OFFLINE_LOG_ACTIONS.has('auto_code_preflight_failed'));
     const workerManager = fs.readFileSync(path.join(SRC, 'runtime/worker-manager.ts'), 'utf8');
     assert.match(workerManager, /'ws_400'/);
+});
+
+test('掉线自愈准入：微信看滚动凭证，QQ 看 NapCat 重签服务是否可用', () => {
+    reset();
+    assert.equal(ka.canRecoverAccount(wxAccount()), true);
+    assert.equal(ka.canRecoverAccount(wxAccount({ refreshtoken: '' })), false, '只有 loginBuffer 的微信账号不能滚动续期');
+    assert.equal(ka.canRecoverAccount(qqAccount()), true, 'QQ 配好 NapCat 即可免扫码重签');
+
+    mocks.qqConfigured = false;
+    assert.equal(ka.canRecoverAccount(qqAccount()), false, '未配置 / 不支持重签时不再假装能自愈');
+    assert.equal(ka.canRecoverAccount(null), false);
+});
+
+test('QQ 账号掉线后也能自动重签 Code 并重新上线（不再只认微信）', async () => {
+    reset();
+    mocks.accounts = [qqAccount()];
+    const calls = [];
+    mocks.qqRefreshImpl = async id => {
+        calls.push(id);
+        return { ok: true, code: 'fresh-code' };
+    };
+    assert.equal(await ka.refreshAndMaybeRestart('9', 'offline', NOW), true);
+    assert.deepEqual(calls, ['9'], 'QQ 走 NapCat 重签');
+    assert.deepEqual(mocks.restarts, ['9'], '拿到新 Code 后立刻重启账号');
+    assert.ok(mocks.logs.some(entry => entry.action === 'auto_code_refresh' && entry.msg.includes('QQ 登录 Code 已重签')));
+});
+
+test('QQ 重签失败时不重启，并把原因写进账号日志', async () => {
+    reset();
+    mocks.accounts = [qqAccount()];
+    mocks.qqRefreshImpl = async () => ({ ok: false, skipped: true, error: '当前 QQ 授权服务不支持免扫码重签' });
+    assert.equal(await ka.refreshAndMaybeRestart('9', 'offline', NOW), false);
+    assert.deepEqual(mocks.restarts, []);
+    assert.ok(mocks.logs.some(entry => entry.action === 'auto_code_refresh_failed' && entry.msg.includes('不支持免扫码重签')));
+});
+
+test('掉线重登限流：一小时 5 次，超了暂停 30 分钟，暂停期满继续放行', () => {
+    reset();
+    const attempts = [];
+    for (let i = 0; i < 5; i++) attempts.push(ka.reserveReconnectSlot('limit', NOW + i * MINUTE));
+    assert.deepEqual(attempts.map(a => a.allowed), [true, true, true, true, true]);
+    assert.deepEqual(attempts.map(a => a.attempt), [1, 2, 3, 4, 5]);
+
+    const blocked = ka.reserveReconnectSlot('limit', NOW + 5 * MINUTE);
+    assert.equal(blocked.allowed, false);
+    assert.equal(blocked.state, 'exhausted');
+    assert.equal(blocked.remainingPauseMs, ka.RECONNECT_PAUSE_MS);
+
+    const stillPaused = ka.reserveReconnectSlot('limit', NOW + 20 * MINUTE);
+    assert.equal(stillPaused.allowed, false);
+    assert.equal(stillPaused.state, 'paused', '暂停期内不再重登，也不重复刷「已用满」日志');
+
+    const resumed = ka.reserveReconnectSlot('limit', NOW + 5 * MINUTE + ka.RECONNECT_PAUSE_MS + 1);
+    assert.equal(resumed.allowed, true, '暂停期满后重新放行');
+    assert.equal(resumed.attempt, 1, '暂停期满后重新起一轮额度，给临时故障一次机会');
+});
+
+test('掉线重登限流：窗口滚过 1 小时后计数归零', () => {
+    reset();
+    for (let i = 0; i < 5; i++) ka.reserveReconnectSlot('roll', NOW + i * MINUTE);
+    assert.equal(ka.reserveReconnectSlot('roll', NOW + 5 * MINUTE).allowed, false);
+    const afterWindow = ka.reserveReconnectSlot('roll', NOW + ka.RECONNECT_WINDOW_MS + 1);
+    assert.equal(afterWindow.allowed, true);
+    assert.equal(afterWindow.attempt, 1, '新窗口从 1 重新计数');
+});
+
+test('登录失败不再直接杀进程：交给主进程补 Code 后重登', () => {
+    const network = fs.readFileSync(path.join(SRC, 'utils/network.ts'), 'utf8');
+    assert.doesNotMatch(network, /process\.exit\(0\)/, '登录失败不能再直接退出进程，否则掉线重登永远收不到信号');
+    assert.match(network, /finalizeConnection\(context, \{ source: 'login_failed'/, '走正常的断线收尾');
+    assert.match(network, /交由主进程补 Code 后重试登录/);
+
+    const keepAlive = fs.readFileSync(path.join(SRC, 'services/wx-keepalive.ts'), 'utf8');
+    assert.doesNotMatch(keepAlive, /if \(!hasWxCredential\(account\)\) return;/, '掉线重登不能再拿微信凭证当准入门槛');
+    assert.match(keepAlive, /canRecoverAccount\(account\)/, '准入条件改为「能否免扫码恢复」');
+    assert.match(keepAlive, /request === '\.\/qq-credential'|require\('\.\/qq-credential'\)/);
 });

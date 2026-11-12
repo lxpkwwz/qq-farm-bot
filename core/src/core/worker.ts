@@ -8,7 +8,7 @@ const { CONFIG, updateRuntimeConfig } = require('../config/config');
 const { getLevelExpProgress, loadConfigs } = require('../config/gameConfig');
 const { getAutomation, getPreferredSeed, getConfigSnapshot, applyConfigSnapshot } = require('../models/store');
 const { checkAndClaimEmails, configureEmailClaim, getEmailDailyState } = require('../services/email');
-const { checkFarm, startFarmCheckLoop, stopFarmCheckLoop, refreshFarmCheckLoop, getLandsDetail, getAvailableSeeds, purchaseSeed, runFarmOperation, runFertilizerByConfig, fertilizeOwnLand } = require('../services/farm');
+const { checkFarm, startFarmCheckLoop, stopFarmCheckLoop, refreshFarmCheckLoop, getOwnFarmMaturityDelayMs, consumeFarmWakeup, getLandsDetail, getAvailableSeeds, purchaseSeed, runFarmOperation, runFertilizerByConfig, fertilizeOwnLand } = require('../services/farm');
 const { checkFriends, startFriendCheckLoop, stopFriendCheckLoop, refreshFriendCheckLoop, getFriendsList, getFriendsListCacheOnly, getFriendLandsDetail, doFriendOperation, deleteFriend, runScheduledStealCheck, runGoldenBugPlacement } = require('../services/friend');
 const { getInteractRecords } = require('../services/interact');
 const { processInviteCodes } = require('../services/invite');
@@ -232,6 +232,31 @@ function randomIntervalMs(minMs: number, maxMs: number): number {
     return sec * 1000;
 }
 
+// 自家农场成熟驱动：比服务端成熟墙钟晚 1.5 秒唤醒，避开时间同步的小偏差。
+const FARM_MATURITY_WAKE_BUFFER_MS = 1500;
+const FARM_WAKEUP_IMMEDIATE_MS = 200;
+const FARM_TICK_LOCK_WAIT_MS = 30 * 1000;
+
+/**
+ * 算农场线下一次唤醒时刻。
+ * 优先级：巡查中攒下的推送 / 收获失败 / 整轮超时登记的「尽快补跑」
+ *       > 下一块自家作物的成熟点
+ *       > 常规 20~25 秒随机轮询。
+ * 配置下发时也走这里，所以不会再出现「面板保存把到期线推后、农场二十多秒叫不醒」。
+ */
+function planNextFarmRun(nowMs: number, farmMs: number): number {
+    const wakeReason = consumeFarmWakeup();
+    if (wakeReason) {
+        logFileOnly('巡田', `提前唤醒农场巡查: ${wakeReason}`);
+        return nowMs + FARM_WAKEUP_IMMEDIATE_MS;
+    }
+    const maturityDelayMs = getOwnFarmMaturityDelayMs();
+    const maturityAt = maturityDelayMs > 0
+        ? nowMs + maturityDelayMs + FARM_MATURITY_WAKE_BUFFER_MS
+        : Number.POSITIVE_INFINITY;
+    return Math.max(nowMs + 1000, Math.min(nowMs + farmMs, maturityAt));
+}
+
 function resetUnifiedSchedule(options: { preserveSteal?: boolean } = {}): void {
     const farmMs = randomIntervalMs(
         CONFIG.farmCheckIntervalMin || CONFIG.farmCheckInterval || 2000,
@@ -242,7 +267,7 @@ function resetUnifiedSchedule(options: { preserveSteal?: boolean } = {}): void {
         workerConfig.friendCheckIntervalMax || 15000
     );
     const now = Date.now();
-    nextFarmRunAt = now + farmMs;
+    nextFarmRunAt = planNextFarmRun(now, farmMs);
     // 老版本节奏：帮忙循环保底常规间隔，偷菜首轮给一个短的随机窗口，
     // 后续完全由 runScheduledStealCheck 返回的成熟时间动态决定。
     nextFriendRunAt = now + friendMs;
@@ -390,7 +415,7 @@ async function runFarmTick(auto: any): Promise<void> {
         // 与 friend/steal tick 一致：账号停机又立刻重启时，旧轮次不能把新会话
         // 刚算好的到期时间覆盖掉，也不能提前解除新会话的运行中守卫。
         if (generation === runtimeGeneration) {
-            nextFarmRunAt = Date.now() + farmMs;
+            nextFarmRunAt = planNextFarmRun(Date.now(), farmMs);
             farmTaskRunning = false;
         }
     }
@@ -487,7 +512,10 @@ async function runUnifiedTick(): Promise<void> {
 
     const auto = getAutomation();
     // 农场仍串行（要等它真做完）；好友/偷菜在访问间隔中会让出锁，不必让它们挡住后续 tick。
-    if (dueFarm) await runExclusiveAutomationTask('farm_tick', () => runFarmTick(auto));
+    if (dueFarm) await runExclusiveAutomationTask('farm_tick', () => runFarmTick(auto), {
+        priority: true,
+        timeoutMs: FARM_TICK_LOCK_WAIT_MS,
+    });
     if (!unifiedSchedulerRunning || !loginReady || generation !== runtimeGeneration) return;
     // 好友/偷菜这里**不能**再套一层自动化锁：checkFriends 内部按单次访问用 detached 独立入队，
     // 一旦外层也持锁，那些 detached 调用会排到「外层任务自己」后面，而外层正在 await 它们 —— 死锁。
@@ -877,10 +905,10 @@ async function startBot(config: any): Promise<void> {
             networkEvents.off('sell', onSellGain);
         }
         onSellGain = (sellInfo: any) => {
-            // 老版口径：优先取事件里的 count（实际卖出果实数量），兼容旧版纯金币数字量。
-            const gold = Number(sellInfo && sellInfo.gold || sellInfo || 0);
-            const count = Number(sellInfo && sellInfo.count || 0);
-            if (!Number.isFinite(gold) || gold <= 0) return;
+            // warehouse 恒向事件里发 { gold, count }；以 count（实际卖出果实数量）为准。
+            // 旧口径的 `gold || sellInfo` 在 gold===0 时会回落成对象，Number(obj) 得 NaN，
+            // 进而直接 return 丢掉本次卖出计数。这里只认 count，不依赖金币金额。
+            const count = Number(sellInfo && typeof sellInfo === 'object' ? sellInfo.count : 0) || 0;
             if (count > 0) recordOperation('sell', count);
         };
         networkEvents.on('sell', onSellGain);
@@ -952,17 +980,28 @@ async function startBot(config: any): Promise<void> {
         // 登录成功后，以当前金币/经验/点券作为统计基线，并清空会话增量
         const latest = getUserState();
         const accountId = process.env.FARM_ACCOUNT_ID || '';
-        initStatsWithPersistence(
-            accountId,
-            Number(latest.gold || 0),
-            Number(latest.exp || 0),
-            Number(latest.coupon || 0),
-            goldBeanReady ? Number(latest.goldBean || 0) : null,
-        );
-        resetSessionGains();
+        try {
+            initStatsWithPersistence(
+                accountId,
+                Number(latest.gold || 0),
+                Number(latest.exp || 0),
+                Number(latest.coupon || 0),
+                goldBeanReady ? Number(latest.goldBean || 0) : null,
+            );
+            resetSessionGains();
+        } catch (e: any) {
+            // 统计落盘失败（磁盘只读/写满）不应反噬已建立的连接。
+            logWarn('系统', `登录后统计初始化失败: ${e?.message || e}`, { module: 'system', event: '统计初始化', result: 'error' });
+        }
 
-        // 登录成功后启动各模块
-        await runExclusiveAutomationTask('invite_codes', processInviteCodes);
+        // 以下均为附属初始化。network 的 sendLogin 会把 onLoginSuccess 抛出的错误
+        // 当成「登录初始化失败」直接 finalize + terminate 连接，所以每一步都必须自带
+        // 兜底，避免附属功能的小故障把刚登录成功的健康连接掐掉（可形成重启循环）。
+        try {
+            await runExclusiveAutomationTask('invite_codes', processInviteCodes);
+        } catch (e: any) {
+            logWarn('系统', `登录后邀请码处理失败: ${e?.message || e}`, { module: 'system', event: '邀请码处理', result: 'error' });
+        }
         if (!canContinueLogin()) return;
         if (getAutomation().fertilizer_gift) {
             await runExclusiveAutomationTask('fertilizer_gifts_login', openFertilizerGiftPacksSilently).catch(() => 0);
@@ -971,8 +1010,16 @@ async function startBot(config: any): Promise<void> {
 
         if (!canContinueLogin()) return;
         // 立即发送一次状态，再串行跑启动序列（不阻塞状态上报）
-        syncStatus();
-        await runExclusiveAutomationTask('startup_sequence', () => runStartupSequence(canContinueLogin));
+        try {
+            syncStatus();
+        } catch (e: any) {
+            logWarn('系统', `登录后状态同步失败: ${e?.message || e}`, { module: 'system', event: '状态同步', result: 'error' });
+        }
+        try {
+            await runExclusiveAutomationTask('startup_sequence', () => runStartupSequence(canContinueLogin));
+        } catch (e: any) {
+            logWarn('系统', `启动序列执行失败: ${e?.message || e}`, { module: 'system', event: '启动序列', result: 'error' });
+        }
     };
 
     connect(code, onLoginSuccess);
@@ -1066,7 +1113,7 @@ function handleTerminalDisconnect(payload: any): void {
     const code = Number(payload?.code) || 0;
     const reason = String(payload?.reason || '连接已断开');
     const phase = String(payload?.phase || 'unknown');
-    log('系统', `连接已断开，不再使用旧 Code 重连 (source=${source}, code=${code}, phase=${phase})`, {
+    log('系统', `连接已断开，等待自动补 Code 重登 (source=${source}, code=${code}, phase=${phase})`, {
         source, disconnectCode: code, reason, phase, diagnostics: payload?.diagnostics || null,
     });
     saveStats();

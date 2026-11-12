@@ -21,7 +21,15 @@ const store = require('../models/store');
 
 const QQ_MINIAPP_APP_ID = '1112386029';
 const REQUEST_TIMEOUT_MS = 2500;
-const UNSUPPORTED_CODES = /^(?:TASK_EXPIRED|LOGIN_REQUIRED|LOGOUT_REQUIRED|WORKFLOW_BUSY|INVALID_SIGNATURE|SIGNATURE_REQUIRED)$/i;
+/**
+ * 这些错误代表「这个授权服务根本不支持免扫码重签」（参数/鉴权/任务模型层面），
+ * 重试多少次都是同一个结果，探到一次就停止探测。
+ *
+ * LOGIN_REQUIRED 不在此列：它表示 NapCat 里的 QQ 当前没有登录，属于可恢复状态
+ * （重新登录 NapCat 后就能继续重签），所以每次掉线仍应尝试，并由掉线重登的
+ * 次数闸门负责限流。
+ */
+const UNSUPPORTED_CODES = /^(?:TASK_EXPIRED|LOGOUT_REQUIRED|WORKFLOW_BUSY|INVALID_SIGNATURE|SIGNATURE_REQUIRED)$/i;
 
 export interface QqCodeRefreshResult {
     ok: boolean;
@@ -50,6 +58,18 @@ function loginSettings(): any {
 /** 仅供测试重置进程内的「服务不支持」标记。 */
 function resetQqCodeRefreshState(): void {
     unsupported = false;
+}
+
+/**
+ * 当前进程能否对 QQ 账号做免扫码重签（掉线重登的准入条件）。
+ *
+ * 需要启用 QQ 扫码服务并填好 NapCat 地址与签名；一旦探测到该服务不支持
+ * 免扫码重签（标准 qq-miniapp-auth 就是这种），这里直接返回 false，
+ * 避免掉线后反复重登必然失败、把账号日志刷满。
+ */
+function isQqCodeRefreshConfigured(): boolean {
+    if (unsupported) return false;
+    return !!loginSettings();
 }
 
 async function tryRefreshQqGameCode(accountId: unknown): Promise<QqCodeRefreshResult> {
@@ -89,8 +109,9 @@ async function tryRefreshQqGameCode(accountId: unknown): Promise<QqCodeRefreshRe
             return { ok: true, code };
         }
         const reason = String(data?.code || data?.error || '').trim();
-        // 标准服务明确不支持时不再重复探测，避免每次启动都发无效请求。
-        if (data?.ok === false || UNSUPPORTED_CODES.test(reason)) unsupported = true;
+        // 只有明确的「服务不支持免扫码重签」才永久停止探测；其余失败（含 NapCat
+        // 掉线、临时 5xx）保留重试机会，由掉线重登的次数闸门限流。
+        if (UNSUPPORTED_CODES.test(reason)) unsupported = true;
         return { ok: false, skipped: unsupported, error: reason || 'QQ 授权服务未返回新 Code' };
     }
     catch (error: any) {
@@ -101,5 +122,6 @@ async function tryRefreshQqGameCode(accountId: unknown): Promise<QqCodeRefreshRe
 module.exports = {
     QQ_MINIAPP_APP_ID,
     tryRefreshQqGameCode,
+    isQqCodeRefreshConfigured,
     resetQqCodeRefreshState,
 };

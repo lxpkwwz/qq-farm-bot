@@ -240,7 +240,9 @@ function isActivityOpen(state: any): boolean {
     if (state.active === false) return false;
     if (state.active === true) return true;
     const endSec = toNum(state.endTime);
-    if (endSec > 0) return endSec > Math.floor(Date.now() / 1000);
+    // endTime 与同文件 buildActivityWindowGate / rescheduleActivityEventTimers 一样按服务器时间折算，
+    // 不能拿本地 Date.now() 比，否则本机时钟与服务器时钟有偏移时开关边界会判错。
+    if (endSec > 0) return endSec > getServerTimeSec();
     return true;
 }
 

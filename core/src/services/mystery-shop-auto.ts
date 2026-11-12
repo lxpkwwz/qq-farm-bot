@@ -94,7 +94,9 @@ function mysteryShopVisitKey(shop: any): string {
 
 function decideMysteryShopTick(shop: any, automation: any = {}, state: MysteryShopAutoState = defaultState): MysteryShopDecision {
     const npc = shop?.npc;
-    if (!shop?.active || !npc?.id || Number(npc?.reward?.count) <= 0) {
+    // 用 `!(x > 0)` 而非 `x <= 0`：字段缺失时 Number(undefined) === NaN，而 `NaN <= 0`
+    // 为 false 会被当成有效商品继续下单。`!(NaN > 0)` 才能正确拦下缺字段/0/负数。
+    if (!shop?.active || !npc?.id || !(Number(npc?.reward?.count) > 0)) {
         return { notifyArrival: false, shouldBuy: false, skipReason: 'inactive' };
     }
 
