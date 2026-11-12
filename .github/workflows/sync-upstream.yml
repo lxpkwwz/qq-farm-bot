@@ -1,0 +1,42 @@
+name: Sync upstream
+
+# 每 6 小时把上游 602832789/qq-farm-bot 的 main 合并到本 fork。
+# cron 使用 UTC：0 */6 * * * 对应北京时间 02:00 / 08:00 / 14:00 / 20:00。
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Merge upstream main
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/602832789/qq-farm-bot.git
+          git fetch --no-tags upstream main
+
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "fork main 已包含上游最新提交，无需同步。"
+            exit 0
+          fi
+
+          git merge --no-edit upstream/main
+          git push origin HEAD:main
+          echo "已同步到 $(git rev-parse --short upstream/main)"
