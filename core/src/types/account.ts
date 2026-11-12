@@ -22,6 +22,13 @@ export interface Account {
   wxCredentialRefreshedAt?: number;
   wxCredentialLastAttemptAt?: number;
   wxCredentialRefreshError?: string;
+  /**
+   * 服务端已明确吊销授权（-109 / 40188 invalid scope），自动续期必须停手。
+   *
+   * 只在为 `true` 时有意义：换到新凭据（重新扫码 / 手动填 Code / 续期成功）
+   * 时由 `addOrUpdateAccount` 清掉。缺失等价于 `false`。
+   */
+  wxCredentialNeedsRescan?: boolean;
 }
 
 export interface AccountsData {

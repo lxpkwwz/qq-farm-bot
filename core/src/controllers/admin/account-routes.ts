@@ -38,11 +38,14 @@ function mountAccountRoutes(app: Application, ctx: AdminContext): void {
     app.get('/api/accounts', (req: Request, res: Response) => {
         try {
             const data = ctx.provider.getAccounts();
-            // 只把「能否免扫码续期」的判定结果发给浏览器，不下发长效凭证明文。
-            // 判定口径与 wx-keepalive 一致：wx 账号 + wxid + refreshtoken 三者齐备。
+            // 只把「能不能免扫码恢复」的判定结果发给浏览器，不下发长效凭证明文。
+            // 两个口径都要发：wxPreflightSupported = 能滚 token（wxid + refreshtoken），
+            // wxCanRecover = 掉线后能免扫码换 Code（再加上只有 loginBuffer 的情况），
+            // 后者与 wx-keepalive 的 canRecoverAccount 完全同一个函数。
             // 同时附带自动续期账本快照（仅时间戳与次数），供卡片显示无人值守结果。
             const { hasWxCredential } = require('../../services/wx-credential');
-            res.json({ ok: true, data: toPublicAccountsData(data, hasWxCredential, getPreflightStatsSnapshot()) });
+            const { canRecoverAccount } = require('../../services/wx-keepalive');
+            res.json({ ok: true, data: toPublicAccountsData(data, hasWxCredential, getPreflightStatsSnapshot(), canRecoverAccount) });
         } catch (e: any) {
             handleApiError(res, e);
         }

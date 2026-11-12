@@ -10,7 +10,8 @@ const COLOR_AMBER = 'text-amber-600 dark:text-amber-400'
 const COLOR_RED = 'text-red-600 dark:text-red-400'
 const COLOR_GRAY = 'text-gray-500'
 
-const WARNING_WINDOW_MS = 45 * 60_000
+/** 后端在到期前 5 分钟才滚令牌，界面提前 10 分钟提示即可（与 core 的 code-watch 对齐）。 */
+const WARNING_WINDOW_MS = 10 * 60_000
 const DEFAULT_TTL_SECONDS = 7200
 
 export interface CredentialStatus {
@@ -95,7 +96,13 @@ function formatAgo(ts: number, now: number): string {
 export function getWxPreflightSummary(acc: any, now: number = Date.now()): WxPreflightSummary | null {
   if (String(acc?.platform || '') !== 'wx')
     return null
-  if (acc.wxPreflightSupported !== true)
+  // 账本记的是「自动续期 / 掉线后自动重登」的结果。只有 loginBuffer 的账号滚不了
+  // token（wxPreflightSupported=false），但掉线换 Code 照样会自动做并写进账本，
+  // 所以门禁要看 wxCanRecover。字段缺失说明服务还是旧版本，回落到旧判定。
+  const canRecord = acc.wxCanRecover === undefined
+    ? acc.wxPreflightSupported === true
+    : acc.wxCanRecover === true
+  if (!canRecord)
     return null
   const stats = acc.wxPreflightStats
   if (!stats || typeof stats !== 'object')

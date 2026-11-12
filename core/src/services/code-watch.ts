@@ -31,7 +31,14 @@ export interface AutoFixResult {
     error: string;
 }
 
-const WARNING_WINDOW_MS = 45 * 60_000;
+/**
+ * 「即将到期」的提示窗口。
+ *
+ * 后端在到期前 5 分钟才真正滚令牌，所以界面提前 10 分钟转琥珀色即可。
+ * 原来沿用老版本的 45 分钟，会让账号在长达 40 分钟里一直显示「即将到期」
+ * 却什么都没发生，看起来像卡住了。
+ */
+const WARNING_WINDOW_MS = 10 * 60_000;
 const DEFAULT_TTL_SECONDS = 7200;
 /** 这些账号日志代表「Code 已失效导致掉线」，而不是用户手动停止。 */
 const OFFLINE_LOG_ACTIONS = new Set([

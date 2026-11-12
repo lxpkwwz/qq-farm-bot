@@ -35,13 +35,13 @@ test('凭证充足时 Code 正常，不做任何提示', () => {
     assert.equal(item.remainingMs, 2 * HOUR);
 });
 
-test('剩余 45 分钟内判定即将过期，且有长效凭证时可自动补 Code', () => {
-    const near = inspectAccountCodeHealth(wxAccount({ expires_at: NOW + 30 * MINUTE }), { now: NOW });
+test('剩余 10 分钟内判定即将过期，且有长效凭证时可自动补 Code', () => {
+    const near = inspectAccountCodeHealth(wxAccount({ expires_at: NOW + 8 * MINUTE }), { now: NOW });
     assert.equal(near.level, 'expiring');
     assert.equal(near.autoFixable, true);
     assert.equal(near.needsManual, false);
-    assert.equal(WARNING_WINDOW_MS, 45 * MINUTE);
-    assert.equal(inspectAccountCodeHealth(wxAccount({ expires_at: NOW + 46 * MINUTE }), { now: NOW }).level, 'ok');
+    assert.equal(WARNING_WINDOW_MS, 10 * MINUTE);
+    assert.equal(inspectAccountCodeHealth(wxAccount({ expires_at: NOW + 11 * MINUTE }), { now: NOW }).level, 'ok');
 });
 
 test('已过期且没有长效凭证时必须手动补 Code', () => {

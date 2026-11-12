@@ -19,7 +19,9 @@ test('定时重登开关与配置字段全部下线', () => {
 
 test('后端不再有按间隔重启账号的定时重登链路', () => {
   assert.doesNotMatch(keepAlive, /定时重登|intervalMinutes|'timer'|"timer"|lastRefreshAt|if \(!config\.enabled\)/)
-  assert.match(keepAlive, /void runCodePreflight\(Date\.now\(\)\)\.catch/, '到期前预防续期保持常开')
+  // 到期前预防续期保持常开，且 running 互斥要等巡检真正结束才释放。
+  assert.match(keepAlive, /runCodePreflight\(Date\.now\(\)\)/, '到期前预防续期保持常开')
+  assert.match(keepAlive, /\.finally\(\(\) => \{\s*running = false;\s*\}\)/, 'running 要等巡检结束才释放')
   assert.match(keepAlive, /if \(!config\.offlineEnabled\) return;/, '掉线重登依然受独立开关控制')
 })
 

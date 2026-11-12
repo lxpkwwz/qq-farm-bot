@@ -56,6 +56,26 @@ interface WorkerManagerOptions {
     onAccountOffline?: (accountId: string, accountName: string, reason: string) => void;
 }
 
+/**
+ * 向 worker 子进程发消息，失败返回 false。
+ *
+ * `process.send` 在 IPC 通道已关闭时是**同步抛错**（ERR_IPC_CHANNEL_CLOSED），
+ * 而不少调用点在 `child.on('message')` 的事件回调里——那里抛出去等价于
+ * uncaughtException，会把主进程带走，所有账号一起掉线。子进程发不出消息只说明
+ * 它已经不可用了，交给调用方按「进程已死」处理即可。
+ */
+function safeSend(proc: any, payload: any): boolean {
+    try {
+        if (!proc || typeof proc.send !== 'function') return false;
+        if (proc.connected === false) return false;
+        proc.send(payload);
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
+
 function createWorkerManager(options: WorkerManagerOptions) {
     const {
         fork,
@@ -179,7 +199,15 @@ function createWorkerManager(options: WorkerManagerOptions) {
         child.send({ type: 'config_sync', config: initialConfigSnapshot });
 
         child.on('message', (msg: any) => {
-            handleWorkerMessage(account.id, child, msg);
+            // 消息处理里会写账号 / 好友库（落盘失败会抛 storageError），也会再往子进程
+            // send。这些都在事件回调里同步执行，不兜住就是 uncaughtException ——
+            // 一次磁盘写入失败会连带打死主进程，所有账号同时掉线。
+            try {
+                handleWorkerMessage(account.id, child, msg);
+            }
+            catch (error: any) {
+                log('错误', `账号 ${account.name} 消息处理失败: ${error && error.message ? error.message : error}`, { accountId: String(account.id), accountName: account.name });
+            }
         });
 
         child.on('error', (err: any) => {
@@ -222,7 +250,15 @@ function createWorkerManager(options: WorkerManagerOptions) {
 
         const proc = worker.process;
         worker.stopping = true;
-        worker.process.send({ type: 'stop' });
+        // send 失败说明子进程已经不可用了。此时若不收口，force_kill 定时器根本不会
+        // 注册，workers[accountId] 会残留一个死条目 —— 而 startWorker 用
+        // `if (workers[account.id]) return false` 判重，账号从此再也起不来，
+        // 面板上却仍显示运行中。
+        if (!safeSend(proc, { type: 'stop' })) {
+            try { proc.kill(); } catch { /* 进程早已退出 */ }
+            delete workers[accountId];
+            return;
+        }
         managerScheduler.setTimeoutTask(`force_kill_${accountId}`, 1000, () => {
             const current = workers[accountId];
             if (current && current.process === proc) {
@@ -472,7 +508,7 @@ function createWorkerManager(options: WorkerManagerOptions) {
                 });
                 const worker_process = workers[accountId];
                 if (worker_process && worker_process.process) {
-                    worker_process.process.send({ type: 'config_sync', config: buildConfigSnapshotForAccount(accountId) });
+                    safeSend(worker_process.process, { type: 'config_sync', config: buildConfigSnapshotForAccount(accountId) });
                 }
             }
         } else if (msg.type === 'known_friend_gids_sync') {
@@ -481,7 +517,7 @@ function createWorkerManager(options: WorkerManagerOptions) {
                 ? msg.gids.map(Number).filter((gid: number) => Number.isFinite(gid) && gid > 0)
                 : [];
             const saved: number[] = setKnownFriendGids(accountId, gids);
-            worker.process.send({
+            safeSend(worker.process, {
                 type: 'config_sync',
                 config: buildConfigSnapshotForAccount(accountId),
             });
@@ -508,7 +544,7 @@ function createWorkerManager(options: WorkerManagerOptions) {
             if (gid > 0) {
                 const current: number[] = getKnownFriendGids(accountId);
                 setKnownFriendGids(accountId, current.filter((item: number) => Number(item) !== gid));
-                worker.process.send({
+                safeSend(worker.process, {
                     type: 'config_sync',
                     config: buildConfigSnapshotForAccount(accountId),
                 });
@@ -533,7 +569,13 @@ function createWorkerManager(options: WorkerManagerOptions) {
                 }
             });
 
-            worker.process.send({ type: 'api_call', id, method, args });
+            if (!safeSend(worker.process, { type: 'api_call', id, method, args })) {
+                // 子进程已经不可用：立刻失败，别让调用方白等 10~180 秒的 API 超时，
+                // 也顺手把定时器摘掉，免得它继续挂在 scheduler 里。
+                worker.requests.delete(id);
+                managerScheduler.clear(`api_timeout_${accountId}_${id}`);
+                reject(new Error('Worker exited'));
+            }
         });
     }
 

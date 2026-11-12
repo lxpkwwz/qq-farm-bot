@@ -295,10 +295,22 @@ export class WxLoginService {
     }
 
     /**
-     * 用 refreshtoken 续期微信授权，换回新的 accessToken 与 loginBuffer。
-     * refresh token 是滚动凭证：刷新成功后旧 token 立即失效，调用方无论换 Buffer 成败都必须持久化新 token。
+     * 只滚 OAuth token，不取 loginBuffer。
+     *
+     * 后台保活走这条：官方续期只需要把 access / refresh token 滚到下一轮，
+     * loginBuffer 等真的要换 Code 时再按需取。YYB-Go-Enhanced 的注释写得很直白——
+     * 官方 token 保活不获取新的 ILink login buffer，buffer 在协议调用真正需要时才恢复。
+     * 每次保活都顺手取一次 buffer，等于每 2 小时多打一次
+     * pcyyb_get_wx_login_buffer_auth，而决定授权存活的是 OAuth 层调用次数，不是业务请求数。
      */
-    async refreshLoginBuffer(input: { openid?: string; refreshtoken?: string; accesstoken?: string }): Promise<WxCredential> {
+    async refreshOAuthToken(input: { openid?: string; refreshtoken?: string; accesstoken?: string }): Promise<{
+        openid: string;
+        refreshtoken: string;
+        accesstoken: string;
+        expires_in: number;
+        expires_at: number;
+        refreshedAt: number;
+    }> {
         const openid = String(input?.openid || '').trim();
         const refreshtoken = String(input?.refreshtoken || '').trim();
         const accesstoken = String(input?.accesstoken || '').trim();
@@ -331,7 +343,17 @@ export class WxLoginService {
         if (!nextAccessToken) throw new Error('微信授权续期响应缺少 access_token');
         const refreshedAt = Date.now();
         const expiry = tokenExpiry(info.expires_in ?? info.expiresIn ?? data.expires_in ?? data.expiresIn, refreshedAt);
-        // 用新凭证换 loginBuffer；失败时抛出的错误里带上已滚动的新 token，调用方仍能保存。
+        return { openid, refreshtoken: nextRefreshToken, accesstoken: nextAccessToken, ...expiry, refreshedAt };
+    }
+
+    /**
+     * 用 refreshtoken 续期微信授权，换回新的 accessToken 与 loginBuffer。
+     * refresh token 是滚动凭证：刷新成功后旧 token 立即失效，调用方无论换 Buffer 成败都必须持久化新 token。
+     */
+    async refreshLoginBuffer(input: { openid?: string; refreshtoken?: string; accesstoken?: string }): Promise<WxCredential> {
+        const oauth = await this.refreshOAuthToken(input);
+        const { openid, refreshtoken: nextRefreshToken, accesstoken: nextAccessToken, refreshedAt } = oauth;
+        const expiry = { expires_in: oauth.expires_in, expires_at: oauth.expires_at };
         const lbPayload = JSON.stringify({
             extInfo: {
                 listS: {
@@ -364,9 +386,11 @@ export class WxLoginService {
             loginBuffer = lbData?.code === 0 ? pickLoginBuffer(lbData) : '';
             if (!loginBuffer) throw new Error(`获取微信登录凭证失败：code=${String(lbData?.code)} msg=${String(lbData?.msg || '未知错误')}`);
         } catch (error: any) {
-            const rotated: any = new Error(error?.message || '获取微信登录凭证失败');
-            rotated.rotated = { refreshtoken: nextRefreshToken, accesstoken: nextAccessToken, ...expiry, refreshedAt };
-            throw rotated;
+            // token 已经滚动了，即使取 buffer 失败也必须把新 token 交给调用方落盘，
+            // 否则账号里留着已被服务端作废的旧 token，之后每次续期都会失败。
+            const rolled: any = new Error(error?.message || '获取微信登录凭证失败');
+            rolled.rotated = { refreshtoken: nextRefreshToken, accesstoken: nextAccessToken, ...expiry, refreshedAt };
+            throw rolled;
         }
         return {
             openid,
@@ -378,9 +402,9 @@ export class WxLoginService {
         };
     }
 
-    async issueCode(session: WxLoginSession, appId: string): Promise<string> {
+    async issueCode(session: WxLoginSession, appId: string, accountId?: string): Promise<string> {
         if (!session.loginBuffer) throw new Error('WeChat login session has not been confirmed');
-        return getNativeWxLoginCode(session.loginBuffer, appId);
+        return getNativeWxLoginCode(session.loginBuffer, appId, accountId ? { accountId: String(accountId) } : {});
     }
 
     destroy(session: WxLoginSession): void {

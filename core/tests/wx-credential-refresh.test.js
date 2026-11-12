@@ -8,12 +8,14 @@ const mocks = {
     accounts: [],
     writes: [],
     refreshImpl: null,
+    oauthImpl: null,
     issueImpl: null,
 };
 
 class MockWxLoginService {
     async refreshLoginBuffer(input) { return mocks.refreshImpl(input); }
-    async issueCode(session, appId) { return mocks.issueImpl(session, appId); }
+    async refreshOAuthToken(input) { return mocks.oauthImpl(input); }
+    async issueCode(session, appId, accountId) { return mocks.issueImpl(session, appId, accountId); }
     destroy() {}
 }
 
@@ -52,6 +54,7 @@ function reset(patch = {}) {
     }];
     mocks.writes = [];
     mocks.refreshImpl = async () => { throw new Error('不应调用 refreshtoken 滚动'); };
+    mocks.oauthImpl = async () => { throw new Error('不应调用 OAuth 续期'); };
     mocks.issueImpl = async () => 'FRESH_CODE';
 }
 
@@ -139,4 +142,66 @@ test('loginBuffer 过期时回落到滚动续期，且不会因同一把锁重�
     assert.equal(result.ok, true);
     assert.equal(result.code, 'FRESH_CODE');
     assert.equal(mocks.accounts[0].refreshtoken, 'r2');
+});
+
+test('后台保活只滚 token：不取 loginBuffer、不换 Code、不动现有 Code', async () => {
+    reset();
+    let issueCalls = 0;
+    mocks.issueImpl = async () => { issueCalls += 1; return 'SHOULD_NOT_HAPPEN'; };
+    mocks.oauthImpl = async input => {
+        assert.equal(input.refreshtoken, 'r1');
+        return {
+            openid: 'openid-1',
+            refreshtoken: 'r2',
+            accesstoken: 'a2',
+            expires_in: 7200,
+            expires_at: Date.now() + 7200_000,
+            refreshedAt: Date.now(),
+        };
+    };
+
+    const result = await wx.renewOAuthToken('1');
+    assert.equal(result.ok, true);
+    assert.equal(result.codeIssued, false, '保活不签发新 Code');
+    assert.equal(issueCalls, 0, '保活不该碰换码链路');
+    assert.equal(mocks.accounts[0].refreshtoken, 'r2', '新 token 必须落盘');
+    assert.equal(mocks.accounts[0].accesstoken, 'a2');
+    assert.equal(mocks.accounts[0].loginBuffer, 'b1', 'loginBuffer 保持原样，等按需再换');
+    assert.equal(mocks.accounts[0].code, 'OLD', '连接还活着，Code 不需要换');
+});
+
+test('保活遇到 -109 直接判定需要重新扫码，并写入停止标记', async () => {
+    reset();
+    mocks.oauthImpl = async () => { throw new Error('微信授权续期失败：code=-109 msg=refresh token revoked'); };
+
+    const result = await wx.renewOAuthToken('1');
+    assert.equal(result.ok, false);
+    assert.equal(result.needsRescan, true);
+    assert.equal(result.kind, 'refresh_rejected');
+    assert.equal(mocks.accounts[0].wxCredentialNeedsRescan, true, '保活下一轮不再空转');
+});
+
+test('换码遇到 -14（AppID 拒绝）不滚 token，避免反向消耗授权', async () => {
+    reset();
+    let refreshCalls = 0;
+    mocks.refreshImpl = async () => { refreshCalls += 1; throw new Error('不应滚动 token'); };
+    mocks.issueImpl = async () => { throw new Error('wx.login jslogin_business rejected: code=-14'); };
+
+    const result = await wx.ensureFreshGameCode('1');
+    assert.equal(result.ok, false);
+    assert.equal(result.kind, 'application_rejected');
+    assert.equal(refreshCalls, 0, '-14 不是凭证失效，滚 token 只会多一次登录');
+    assert.equal(mocks.accounts[0].wxCredentialNeedsRescan, undefined, '不该被标记成需要重新扫码');
+});
+
+test('换码遇到 -109 时不走「重新取 ticket」的重试，直接判需要重新扫码', async () => {
+    reset();
+    let refreshCalls = 0;
+    mocks.refreshImpl = async () => { refreshCalls += 1; throw new Error('不应滚动 token'); };
+    mocks.issueImpl = async () => { throw new Error('ManualAuth rejected: code=-109 message=token revoked'); };
+
+    const result = await wx.ensureFreshGameCode('1');
+    assert.equal(result.ok, false);
+    assert.equal(result.needsRescan, true);
+    assert.equal(refreshCalls, 0);
 });

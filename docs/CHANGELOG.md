@@ -15,6 +15,10 @@
 
 | 版本 | 更新序号 | 日期 | 更新内容 | 提交 |
 | --- | --- | --- | --- | --- |
+| v3.23.3 | #163 | 2026-11-13 | 全仓完整性复查：修复凭证吊销闸门失效、续期窗口被推迟与续期异常打断主进程 | — |
+| v3.23.2 | #162 | 2026-11-13 | Docker Hub 直连超时时，NapCat 镜像改用加速站或本地标签 | — |
+| v3.23.1 | #161 | 2026-11-13 | QQ 取码链路收口：优先 getOpenAuth，NapCat 基础镜像补固定版本与离线导入路径 | — |
+| v3.23.0 | #160 | 2026-11-13 | 移植 YYB-Go-Enhanced 完整保活方案：会话复用、错误分级与只滚令牌续期 | — |
 | v3.22.11 | #159 | 2026-11-12 | 掉线后无法自愈：补上 QQ 重登与登录失败兜底 | — |
 | v3.22.10 | #158 | 2026-11-12 | 全仓完整性复查：修复统计基线、登录初始化与若干判定缺陷 | — |
 | v3.22.9 | #157 | 2026-11-12 | 成熟唤醒与活动/好友成熟计划的时间基准修正 | — |
@@ -167,6 +171,61 @@ flowchart TB
 ```
 
 ## 详细记录
+### 2026-11-13 · v3.23.3（#163） · 全仓完整性复查：修复凭证吊销闸门失效、续期窗口被推迟与续期异常打断主进程
+
+- **复查范围**：v3.23.x 引入的协议层与保活层（`wx-login/` 四个模块、`wx-credential`、`wx-keepalive`），以及账号存储、worker 进程管理、账号列表投影三处与它们直接相接的代码。
+- **缺陷一（高）·「授权已吊销」标记从未落盘**：`addOrUpdateAccount` 的白名单收下了 `wxCredentialNeedsRescan`，但 `normalizeAccount` 重建账号对象时只挑固定字段，把它丢掉了；而 `saveAccounts` 正是用它归一化后才写文件并回填内存缓存。结果这个标记在内存里只存在一瞬，`wx-keepalive` 里 `if (account.wxCredentialNeedsRescan) continue` 永远为假——凭证被 `-109` 吊销后，当天靠连续失败熔断挡住，跨日后状态重建，第二天又拿死 token 空打 OAuth 层。修法：账号类型补该字段，`normalizeAccount` 只保留 `true`（缺失等价于 false）。
+- **缺陷二（高）·只换 Code 也会把续期窗口推后最多两小时**：`rotatedKeys` 里含 `code`，于是「用 loginBuffer 直接换 Code」「手动填 Code」这类**完全不碰 token** 的操作也会把 `wxCredentialRefreshedAt` 刷成当前时间。而 `code-watch` 与前端都按 `max(expires_at, refreshedAt + 2h)` 重算到期——真实 access token 只剩十分钟，界面和保活却以为还有两小时，等发现时已经过期掉线。这条正好命中「刚换过码、过一阵还是掉」。修法：把「换 Code」与「换令牌」拆成两组 key，只有 `refreshtoken` / `accesstoken` / `loginBuffer` / `expires_at` 真的变了才推进基准时间。
+- **缺陷三（高）·续期异常会打断主进程**：`refreshAndMaybeRestart` 只有 `finally` 没有 `catch`，而掉线重登那条路径是裸 `void refreshAndMaybeRestart(key, 'offline')`。任何预期外异常（账号文件写入失败、上游返回结构异常）都会变成未处理拒绝，Node 20 默认按致命错误处理，**主进程直接退出，所有账号同时掉线**。修法：函数内部把异常收口成「一次失败」——记账号日志、写系统日志、推进退避状态；调用点再加一层 `catch` 兜底。
+- **缺陷四（高）·worker 消息处理没有兜底**：`child.on('message')` 的回调里会写账号库（落盘失败抛 `storageError`）、会往子进程 `send`（IPC 通道关闭时**同步抛** `ERR_IPC_CHANNEL_CLOSED`）。这些都跑在事件回调里，抛出去等价于 `uncaughtException`，同样会带走主进程。修法：消息处理整体 try/catch；新增 `safeSend()` 包装全部 `send` 调用点；`stopWorker` 的 `send` 失败时直接清掉 worker 条目（否则 `startWorker` 的判重会让账号永远起不来，面板却显示运行中）；`callWorkerApi` 发不出去就立即 `reject` 并摘掉超时定时器，不让调用方白等 10~180 秒。
+- **缺陷五（中）·保活巡检的互斥是假的**：`tick()` 里用 `void runCodePreflight(...)` 触发异步任务后，`finally` 立刻把 `running` 置回 `false`——上一轮还在等上游，下一个 tick 照样进来，只靠 `inFlight` 与退避闸门兜着。修法：改成等 Promise 真正结束再释放，并给巡检异常加日志（原来是 `catch(() => {})` 全吞，出问题完全看不见）。
+- **缺陷六（中）·面板账本用了错误的判定口径**：后端下发的 `wxPreflightSupported` 表示「能滚 token」（`wxid` + `refreshtoken`），而真正的恢复能力 `canRecoverAccount` 还要包含「只有 loginBuffer」的账号。后者滚不了 token，但掉线后会自动换 Code 并写进账本，前端却因为 `wxPreflightSupported === false` 把整段账本隐藏，用户看到的是与事实相反的「不支持」。修法：投影新增 `wxCanRecover`（直接复用 `canRecoverAccount`，只在微信账号上下发），前端账本门禁改用它，字段缺失时回落到旧判定。
+- **顺手更正的三条测试**：`account-credential-state.test.js` 原来断言「换 Code 后 `refreshedAt` 会刷新」——正是缺陷二的错误语义，已改成「换 Code 不推进基准、换令牌才推进」；`code-preflight.test.js` 与 `account-online-card.test.mjs` 里断言 `void runCodePreflight(...).catch` 的接线，已改为断言新的「Promise 结束才释放 running + 异常必须落日志」。
+- **已知未修（记录，单独一版处理）**：`worker-manager` 的「持续离线 N 分钟自动删除账号」在主路径上不可达——计时状态 `disconnectedSince` 挂在 worker 条目上，而真实掉线会在 300ms~1s 内删掉该条目，分钟级的阈值永远累积不到。修法需要把计时提到账号维度并用独立定时任务，属于功能重做，本次不动。
+- **测试**：core **640 → 648**（新增凭证落盘、换 Code 不推进基准、异常吸收、单账号异常不影响同批、投影双口径等用例），web **215 → 216**。`pnpm lint` 0 error、`build:ts` / `vue-tsc -b` / `vite build` 全过。
+- **边界**：不改任何协议常量、不改 Docker Compose、不改 NAS / 服务器配置。
+
+### 2026-11-13 · v3.23.2（#162） · Docker Hub 直连超时时，NapCat 镜像改用加速站或本地标签
+
+- **现象**：在宿主机上执行 `docker manifest inspect mlikiowa/napcat-docker:v4.18.42` 返回 `failed to configure transport: error pinging v2 registry: Get "https://registry-1.docker.io/v2/": net/http: request canceled while waiting for connection (Client.Timeout exceeded while awaiting headers)`。
+- **定性**：这是网络层的连接超时，不是「标签不存在」。`docker manifest inspect` 由 Docker CLI **直接连接 registry**，不经过宿主机的 `registry-mirrors` 配置；因此在 `docker.io` 无法直连的网络里，它必然超时，也**不能用来判断标签是否可用**。会走镜像加速的是 `docker pull`，两者行为不同。
+- **文档缺口**：上一版只写了「用 `--build-arg NAPCAT_IMAGE=<版本号>` 固定版本」和「离线 `docker load`」两条路，没有覆盖「registry 直连不通、但加速站可用」这种最常见的情况，也没有说明 `manifest inspect` 与 `pull` 的差异，排查时容易被超时误导成版本不存在。
+- **补全获取路径**（`docs/detailed-reference.md`「部署细节」）：① 明确 `manifest inspect` 不走 `registry-mirrors`、验证标签请改用 `docker pull`；② 给出加速站前缀的构建写法 `--build-arg NAPCAT_IMAGE=docker.m.daocloud.io/mlikiowa/napcat-docker:<版本号>`，与 `docker-compose.yml` 里 `NODE_IMAGE` 的写法一致；③ 补一句「宿主机已有该镜像时直接把 `NAPCAT_IMAGE` 写成 `docker images` 里的本地标签，构建阶段不产生任何拉取」。
+- **注释同步**（`napcat/Dockerfile`）：在 `ARG NAPCAT_IMAGE` 上方注明它接受任意完整镜像地址、加速站前缀怎么写、以及 `manifest inspect` 不吃 `registry-mirrors` 这一点。默认值仍保持 `mlikiowa/napcat-docker:latest`，可由 `--build-arg` 覆盖。
+- **事实核对**：归档仓的 release 产物里实际存在 `napcat-docker-v4.15.0-{amd64,arm64}.tar`、`v4.18.19-*`、`v4.18.42-*` 三组版本。至于 Docker Hub 上这些标签是否仍然存活，本机与部署机都无法直连 `registry-1.docker.io`，仍未能确认，所以没有把某个版本号写死成默认值。
+- **测试**：`core/tests/napcat-plugin-ladder.test.js` 由 5 条增至 6 条——新增「文档说明 manifest inspect 不走镜像加速」一条（锁 `registry-mirrors`、加速站前缀、`docker pull` 三处表述），并在「`NAPCAT_IMAGE` 仍可覆盖」里加断言锁住 Dockerfile 注释中的加速站示例。
+- **边界**：不改任何 QQ 协议常量、不改 Docker Compose、不改 NAS / 服务器配置；`NAPCAT_IMAGE` 默认值保持原样。
+
+### 2026-11-13 · v3.23.1（#161） · QQ 取码链路收口：优先 getOpenAuth，NapCat 基础镜像补固定版本与离线导入路径
+
+- **来源**：为排查 QQ 账号掉线，横向核对了两个第三方项目——`DandanLLab/SnowCatQQ`（自称 NapCat 4.18.28 底座 + SnowLuma 融合）与 `XingYunStar/NapCatQQ`（NapCat 归档仓）。前者 `packages/` 目录与 NapCat 逐个对应（`snowcat-core` ↔ `napcat-core` 等），实为同一份源码的改名分支，没有独立的 QQ 登录协议实现；后者提供了当前版本的源码与 release 产物，正好用来核对我们的插件。
+- **取码入口的确定答案**：`NodeIKernelNodeMiscService` 的接口声明里**只有** `getOpenAuth(arg1, arg2)`，而在 `NodeIKernelMiniAppService` 里同样找不到 `checkSessionForMiniApp` / `loginWithAppId` / `getOpenCodeWithAppId`。这三个名字是更早版本 NapCat 的命名，在当前版本上不存在，插件的四步探测实际只有最后一步有效。
+- **顺序改成 getOpenAuth 优先**（`napcat/plugins/qq-miniapp-openauth`）：它第一个参数传 `true` 表示「要新的 Code」；而 `checkSessionForMiniApp` 语义是查已有会话，很可能返回上一轮已被 worker 消费掉的旧 Code——那种 Code 写进账号后连接会被网关拒绝，要等下一轮才能自愈。三个老命名保留为兜底（老版本 NapCat 上 `getOpenAuth` 不存在），但不再排在新 Code 之前。
+- **供应链问题**：NapCat 上游源码仓库 `NapNeko/NapCat` 已返回 404，`NapNeko/NapCatQQ` 只剩 1KB 空壳。而 `napcat/Dockerfile` 的基础镜像是 `mlikiowa/napcat-docker:latest`——浮动标签在这种情况下一旦被覆盖或清理，重建会失败，也无法复现当前正在运行的版本。
+- **补上两条部署路径**（`docs/detailed-reference.md`「部署细节」）：① 用 `--build-arg NAPCAT_IMAGE=mlikiowa/napcat-docker:<版本号>` 固定版本；② 镜像仓库不可达时，从归档仓的 release 产物取分架构的 `napcat-docker-v<版本号>-<架构>.tar`，`docker load` 后指向本地标签，全程不访问 registry。`napcat/Dockerfile` 相应加注释，`NAPCAT_IMAGE` 构建参数本身保持不变。
+- **未做的两件事（附原因）**：① `NAPCAT_IMAGE` 默认值仍是 `:latest`——本机到 Docker Hub 与 `registry-1.docker.io` 均不可达（连接直接失败），无法确认哪些 tag 还存活，凭空写一个版本号不如留待部署侧用 `docker manifest inspect` 确认；② 内置插件会忽略请求里的 `uin`（`index.mjs` 只读 `appId`），而 `qq-credential` 拿到 Code 后直接写盘，多 QQ 账号场景存在把 A 的 Code 写进 B 账号的串号风险。修法是在写入前比对返回的 `uin` 与账号 `uin`，但账号 `uin` 在扫码登录路径下可能为空、格式也未经真机验证，改动会让自动重签在格式不符时整体失效，因此单独一版先小范围验证。
+- **测试**：新增 `core/tests/napcat-plugin-ladder.test.js`（5 条静态回归）：锁定「`getOpenAuth` 排第一」「三个老命名不得删除且不得前置」「`getOpenAuth` 首参为 `true`」「`NAPCAT_IMAGE` 仍可覆盖」「文档同时给出固定版本与离线导入两条路」。
+- **边界**：不改任何 QQ 协议常量、不改 Docker Compose、不改 NAS / 服务器配置；本次只动插件取码顺序与部署文档。
+
+### 2026-11-13 · v3.23.0（#160） · 移植 YYB-Go-Enhanced 完整保活方案：会话复用、错误分级与只滚令牌续期
+
+- **来源**：对照 `525815266/YYB-Go-Enhanced`（同一套应用宝 PC 微信授权协议，实现比本项目完整）逐文件比对后，把它的保活模型、错误分类、登录预算与 HTTPDNS 策略移植过来。协议常量本来就一致（host appid `wxd44977328b36e647`、服务端 ECDH 公钥、`/ilink/ilinkapp/mp/wxaruntime_transfer`、`js-login` cmdID `1029`、clientVersion `524545`），所以这次改的不是协议本身，而是「什么时候、以什么代价去用它」。
+- **根因（为什么老版本能跑好几天，现在两天就掉）**：原来在到期前 **45 分钟**就去打 `pcyyb_refresh_token_auth`，拿到 token 后顺手再取一次 loginBuffer、换一次 Code、把账号连接重启一遍。三个后果叠加：① 官方续期窗口只有约 4 分钟，提前 45 分钟属于窗口外空打，YYB-Go-Enhanced 的注释里明确记着这条路由有「延时失效」记录；② 每 2 小时重启一次连接，面板上看起来就像频繁掉线；③ 每次续期多打一次 `pcyyb_get_wx_login_buffer_auth`，而决定授权存活的是 OAuth 层调用次数，不是业务请求数。
+- **只滚令牌续期**：`WxLoginService` 拆出 `refreshOAuthToken()`（只滚 access/refresh token）；`wx-credential` 相应分成 `renewOAuthToken()`（后台保活专用，不取 loginBuffer、不换 Code、不重启）与 `refreshAccountCredential()`（token + buffer + Code 全链路，只在确实缺 Code 时调用）。`wx-keepalive` 的预检改走前者，提前量 `RENEW_AHEAD_MS` 由 45 分钟收紧到 **5 分钟**，且成功后**不再 `restartWorker`**——面板上「每 2 小时闪一次」随之消失。
+- **按需换码**：掉线重登改为先用 `ensureFreshGameCode()` 拿 loginBuffer 直接换 Code（**零 OAuth 调用**），只有 buffer 被服务端拒绝且存在 refresh token 时才滚一次 token。`-14` 与 `-109` 都不再触发滚动续期。
+- **错误分级**（新增 `core/src/services/wx-login/recovery-policy.ts`，对应 Go 的 `code_recovery.go`）：`-14` 判为 AppID 侧拒绝（`application_rejected`，不是凭证失效）；`-10` 判为 ticket 被拒（允许重取一次）；`-101 / 40014 / 42001` 判为 access token 失效（还能救）；`-109 / 42007 / 40030 / 42002` 与 `40188 + invalid scope` 判为凭证已吊销（`needsRescan`，停止自动重试）；其余传输错误保持可重试。文案判定只在同时出现「invalid/expired/无效/过期/失效」与「refresh token/刷新令牌」时才判死，避免把代理的 `token expired` 当成微信吊销。
+- **-14 修复闸门**：同一会话在两分钟内刚成功拿到过 Code 时，`-14` 不再触发重新登录（`FRESH_SESSION_WINDOW_MS`），避免「AppID 拒绝 → 重新登录 → 更频繁被拒」的反向循环。
+- **动态退避**：`computeRefreshBackoff()` 取 `min(5 分钟, max(30 秒, 剩余寿命 / 2))`；token 已过期给 15 分钟（续期窗口已过，每 tick 重试只是重复被拒）；确定吊销直接熔断到当天结束。原来的固定 5 分钟退避会整窗错过官方 4 分钟窗口。
+- **登录预算**（新增 `core/src/services/wx-login/login-budget.ts`，对应 `login_budget.go`）：滑动窗口 **10 分钟 3 次 / 账号**，只在「新建 ticket + ManualAuth」这种真正让 OAuth 层干活的路径上扣额度；会话缓存命中、保活滚令牌、用户手动续期都不计数。额度用尽时直接返回原有错误，不再打上游。
+- **会话复用**（新增 `core/src/services/wx-login/session-cache.ts` + `native-protocol` 改造）：把握手结果（sendKey / recvKey / f9 / uin / deviceId / hostAppId / PSK / ticket）按「loginBuffer 摘要 + AppID」缓存 20 分钟，换 Code 时直接走短链 early data，跳过整个长链握手与 ManualAuth。会话被拒或超时才退回完整握手。缓存只在进程内，**不落盘**（会话密钥写进 `store.json` 等于把可解密通道的钥匙存到磁盘上）。
+- **业务拒绝码解析**：`native-protocol` 解析 `wx.login` 的 JSLoginResponse 时，先看 `BaseResponse.ret` / `JSAPI Result.ret`，非 0 就抛 `-14` 这类业务拒绝，再找 `code`。早期实现只找 code，找不到就报「解密失败」，于是把「AppID 拒绝」误当成「会话失效」去重新登录。`ret` 是 varint 全 64 位编码的负数，要按 `BigInt.asIntN(32)` 还原，否则 `-14` 会打印成 `18446744073709551602`。
+- **HTTPDNS 修正**（新增 `core/src/services/wx-login/httpdns.ts`，对应 `newdns.go`）：去掉已被微信下线的短链兜底 IP `120.241.131.173`，换成 `116.128.171.253` / `140.207.120.146` / `182.50.15.223` / `182.50.15.171`；短链协议优先 `mmtlsoverhttp`（当前后端在用），长链优先 `mmtlsovertcp`；长链端口按 `443 → 8080 → 80 → 5000` 排序（部分代理只放行 443）；DNS 查询的 `clientversion` 由 `0` 改为 `524545`（传 0 服务端可能返回空列表）；新增 `longcloud.weixin.com:443` 域名直连槽位，DNS 全挂时仍有路可走；结果缓存 10 分钟。
+- **降级而不是判死**：授权被吊销但连接仍在线时，日志输出「仅会话模式」并暂停自动续期，等用户重新扫码，而不是立刻把账号判死；`wxCredentialNeedsRescan` 标记让保活下一轮不再空转，重新扫码 / 手动填 Code 换到新凭据时自动清除。
+- **未采纳（并说明原因）**：① `cmd 3198 AutoAuth` 需要持久化会话密钥并用硬编码公钥验 ECDSA 签名，属于协议核心改造，没有离线实验台不敢上，先用「会话缓存 + 按需换码」拿到同等收益；② H5 取码路线（完全不走 mmtls）与 PCMgr 通道属于第三条兜底链路，自用单账号用不上；③ `pool.go` 的多 channel / provider 抽象 / 熔断总控是为「授权服务商、几十个账号并发」设计的，照搬只增加维护面。
+- **行为变化（用户可见）**：① 账号不再每 2 小时重启一次连接；② 「即将到期」提示窗口由 45 分钟收紧到 10 分钟（后端 5 分钟才真正续期，原来琥珀色会亮 40 分钟却什么都不发生）；③ 凭证真死时日志直接写「授权已被服务端吊销，需要重新扫码」，不再每 60 秒空转一次。
+- **测试与验证**：新增 `wx-recovery-policy.test.js`（6）、`wx-httpdns.test.js`（6）、`wx-login-budget.test.js`（6）、`wx-session-cache.test.js`（5）、`wx-login-code-parse.test.js`（5）；`code-preflight.test.js` 按新模型重写（28），`wx-credential-refresh.test.js` 补 4 条分层续期用例。core **598 → 634**、web **215/215**、`pnpm lint` 0、`build:ts` / `vue-tsc -b` / `vite build` 全过。
+- **边界**：会话缓存只在进程内有效，容器重启后首次换 Code 仍要完整握手一次；登录预算对「手动点续期」不设限，与上游一致；本次未改动任何协议常量，也未改动 NAS / 服务器配置。
+
 ### 2026-11-12 · v3.22.11（#159） · 掉线后无法自愈：补上 QQ 重登与登录失败兜底
 
 **问题**：账号跑两天左右就掉线，并且一直离线；老版本能连着好几天在线。先分两件事查：掉线本身是代码问题还是登录协议过期。

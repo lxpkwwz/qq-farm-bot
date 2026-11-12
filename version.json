@@ -1,12 +1,44 @@
 {
   "major": 3,
-  "minor": 22,
-  "patch": 11,
-  "build": 159,
-  "version": "3.22.11",
-  "updatedAt": "2026-11-12T12:09:48.624Z",
+  "minor": 23,
+  "patch": 3,
+  "build": 163,
+  "version": "3.23.3",
+  "updatedAt": "2026-11-12T22:36:44.765Z",
   "lastCommit": "—",
   "history": [
+    {
+      "version": "3.23.3",
+      "build": 163,
+      "date": "2026-11-13",
+      "summary": "全仓完整性复查：修复凭证吊销闸门失效、续期窗口被推迟与续期异常打断主进程",
+      "commit": "—",
+      "type": "patch"
+    },
+    {
+      "version": "3.23.2",
+      "build": 162,
+      "date": "2026-11-13",
+      "summary": "Docker Hub 直连超时时，NapCat 镜像改用加速站或本地标签",
+      "commit": "—",
+      "type": "patch"
+    },
+    {
+      "version": "3.23.1",
+      "build": 161,
+      "date": "2026-11-13",
+      "summary": "QQ 取码链路收口：优先 getOpenAuth，NapCat 基础镜像补固定版本与离线导入路径",
+      "commit": "—",
+      "type": "patch"
+    },
+    {
+      "version": "3.23.0",
+      "build": 160,
+      "date": "2026-11-13",
+      "summary": "移植 YYB-Go-Enhanced 完整保活方案：会话复用、错误分级与只滚令牌续期",
+      "commit": "—",
+      "type": "minor"
+    },
     {
       "version": "3.22.11",
       "build": 159,

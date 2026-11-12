@@ -17,6 +17,12 @@ export interface Account {
   wxid?: string
   /** 后端判定的「wxid + refreshtoken 齐备、可免扫码续期」标记；接口不下发凭证明文。 */
   wxPreflightSupported?: boolean
+  /**
+   * 后端判定的「掉线后能免扫码恢复」标记：在 refreshtoken 之外还包含只有
+   * loginBuffer 的账号（滚不了 token，但能直接换 Code）。
+   * 自动续期账本按这个字段决定是否展示；缺失代表服务尚未更新。
+   */
+  wxCanRecover?: boolean
   /** 自动续期账本快照：只有时间戳与次数，无任何凭证内容；字段缺失代表服务尚未更新。 */
   wxPreflightStats?: {
     date?: string

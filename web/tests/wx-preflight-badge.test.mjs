@@ -69,11 +69,14 @@ test('账号类型与后端投影接线：只暴露布尔标记，不下发凭�
   assert.match(store, /接口不下发凭证明文/)
 
   const routes = read('../../core/src/controllers/admin/account-routes.ts')
-  assert.match(routes, /toPublicAccountsData\(data, hasWxCredential, getPreflightStatsSnapshot\(\)\)/)
+  assert.match(routes, /toPublicAccountsData\(data, hasWxCredential, getPreflightStatsSnapshot\(\), canRecoverAccount\)/)
 
   const visibility = read('../../core/src/services/account-visibility.ts')
   assert.match(visibility, /\['refreshtoken', 'accesstoken', 'loginBuffer'\]/)
   assert.match(visibility, /safe\.wxPreflightSupported/)
+  // 「能滚 token」和「掉线能免扫码恢复」是两个口径，必须都下发，
+  // 否则只有 loginBuffer 的账号会明明在自动重登、却被判成「不支持」隐藏账本。
+  assert.match(visibility, /safe\.wxCanRecover = !!canRecover\(account\)/)
   assert.match(visibility, /delete safe\[key\]/)
   assert.match(visibility, /只作用于 HTTP 响应副本/)
 })

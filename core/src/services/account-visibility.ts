@@ -27,12 +27,17 @@ function emptyPublicStats(): any {
     return { date: '', lastSuccessAt: 0, lastFailureAt: 0, successesToday: 0, failuresToday: 0 };
 }
 
-function toPublicAccount(account: any, canPreflight: CanPreflight, statsSnapshot?: StatsSnapshot): any {
+function toPublicAccount(account: any, canPreflight: CanPreflight, statsSnapshot?: StatsSnapshot, canRecover?: CanPreflight): any {
     const safe: any = { ...(account || {}) };
     for (const key of PRIVATE_CREDENTIAL_KEYS) delete safe[key];
     safe.wxPreflightSupported = typeof canPreflight === 'function' ? !!canPreflight(account) : false;
     // QQ 账号不走微信续期机制，不下发这个字段，避免面板误渲染。
     if (String(safe.platform || '') === 'wx') {
+        // 「能不能滚 token」和「掉线后能不能免扫码自愈」不是同一件事：只有
+        // loginBuffer 的账号滚不了 token（wxPreflightSupported=false），但换 Code
+        // 完全没问题，掉线重登照样会成功并写进自动续期账本。两个标记分开下发，
+        // 面板才不会把「有账本但滚不了 token」的账号整段隐藏。
+        if (typeof canRecover === 'function') safe.wxCanRecover = !!canRecover(account);
         const recorded = statsSnapshot?.[String(safe.id ?? '')];
         safe.wxPreflightStats = recorded && typeof recorded === 'object'
             ? { ...emptyPublicStats(), ...recorded }
@@ -41,11 +46,11 @@ function toPublicAccount(account: any, canPreflight: CanPreflight, statsSnapshot
     return safe;
 }
 
-function toPublicAccountsData(data: any, canPreflight: CanPreflight, statsSnapshot?: StatsSnapshot): any {
+function toPublicAccountsData(data: any, canPreflight: CanPreflight, statsSnapshot?: StatsSnapshot, canRecover?: CanPreflight): any {
     const accounts = Array.isArray(data?.accounts) ? data.accounts : [];
     return {
         ...(data || {}),
-        accounts: accounts.map((account: any) => toPublicAccount(account, canPreflight, statsSnapshot)),
+        accounts: accounts.map((account: any) => toPublicAccount(account, canPreflight, statsSnapshot, canRecover)),
     };
 }
 

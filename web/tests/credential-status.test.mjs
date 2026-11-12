@@ -14,7 +14,7 @@ const { outputText } = ts.transpileModule(source, {
 const module = { exports: {} }
 
 new Function('require', 'module', 'exports', outputText)(require, module, module.exports)
-const { getCredentialStatus } = module.exports
+const { getCredentialStatus, getWxPreflightSummary } = module.exports
 
 const HOUR = 3600_000
 const MINUTE = 60_000
@@ -35,10 +35,10 @@ test('有效期充足的凭证显示绿色，且不带待续期文案', () => {
   assert.ok(!status.text.includes('待续期'))
 })
 
-test('剩余 45 分钟内才显示待续期（琥珀色）', () => {
-  assert.equal(getCredentialStatus(account({ expires_at: NOW + 30 * MINUTE }), NOW).color, AMBER)
-  assert.match(getCredentialStatus(account({ expires_at: NOW + 30 * MINUTE }), NOW).text, /待续期/)
-  assert.equal(getCredentialStatus(account({ expires_at: NOW + 46 * MINUTE }), NOW).color, GREEN)
+test('剩余 10 分钟内才显示待续期（琥珀色）', () => {
+  assert.equal(getCredentialStatus(account({ expires_at: NOW + 8 * MINUTE }), NOW).color, AMBER)
+  assert.match(getCredentialStatus(account({ expires_at: NOW + 8 * MINUTE }), NOW).text, /待续期/)
+  assert.equal(getCredentialStatus(account({ expires_at: NOW + 11 * MINUTE }), NOW).color, GREEN)
 })
 
 test('已过期的凭证显示红色', () => {
@@ -87,4 +87,23 @@ test('最近一次续期确实失败（晚于最近成功）才标琥珀色并�
   }), NOW)
   assert.equal(status.color, AMBER)
   assert.match(status.text, /上次续期失败/)
+})
+
+test('自动续期账本按「能否免扫码恢复」显示，而不是「能否滚 token」', () => {
+  const stats = { date: '2026-11-13', lastSuccessAt: NOW - 5 * MINUTE, successesToday: 2, failuresToday: 0 }
+
+  // 只有 loginBuffer 的账号：滚不了 token，但掉线后会被自动换码重登并记账 ——
+  // 这种情况下账本必须显示，否则用户会以为后端没在工作。
+  const onlyBuffer = account({ wxPreflightSupported: false, wxCanRecover: true, wxPreflightStats: stats })
+  const summary = getWxPreflightSummary(onlyBuffer, NOW)
+  assert.ok(summary, '可免扫码恢复的账号必须能看到账本')
+  assert.match(summary.text, /今日成功 2 次/)
+
+  // 旧版服务没有 wxCanRecover 字段时回落到原判定，不能整段消失。
+  const legacy = account({ wxPreflightSupported: true, wxPreflightStats: stats })
+  assert.ok(getWxPreflightSummary(legacy, NOW))
+
+  // 真的没有可恢复凭据：不显示。
+  const none = account({ wxPreflightSupported: false, wxCanRecover: false, wxPreflightStats: stats })
+  assert.equal(getWxPreflightSummary(none, NOW), null)
 })

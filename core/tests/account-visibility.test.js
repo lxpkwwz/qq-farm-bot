@@ -37,6 +37,27 @@ test('账号列表对外投影剥离全部长效凭证明文，保留展示与�
     assert.equal(publicAccount.name, '微信账号');
 });
 
+/** 与 wx-keepalive.canRecoverAccount 同一口径：微信账号 + (loginBuffer 或 refreshtoken)。 */
+const canRecover = account => String(account?.platform || '') === 'wx'
+    && (!!String(account?.loginBuffer || '').trim() || !!String(account?.refreshtoken || '').trim());
+
+test('只有 loginBuffer 的账号：滚不了 token，但掉线后能免扫码重登', () => {
+    const onlyBuffer = account({ refreshtoken: '', wxid: '' });
+    const pub = toPublicAccount(onlyBuffer, canPreflight, undefined, canRecover);
+
+    assert.equal(pub.wxPreflightSupported, false, '没有 refreshtoken，到期前预检做不了');
+    assert.equal(pub.wxCanRecover, true, 'loginBuffer 能直接换 Code，掉线重登照样会成功并记账');
+});
+
+test('两个判定都缺凭据时为 false；QQ 账号不下发 wxCanRecover', () => {
+    assert.equal(
+        toPublicAccount(account({ refreshtoken: '', loginBuffer: '' }), canPreflight, undefined, canRecover).wxCanRecover,
+        false,
+    );
+    const qq = toPublicAccount(account({ platform: 'qq' }), canPreflight, undefined, canRecover);
+    assert.equal('wxCanRecover' in qq, false, 'QQ 不走微信续期，不该带这个字段');
+});
+
 test('免扫码续期标记严格按 wxid + refreshtoken 齐备判定', () => {
     assert.equal(toPublicAccount(account(), canPreflight).wxPreflightSupported, true);
     assert.equal(toPublicAccount(account({ refreshtoken: '' }), canPreflight).wxPreflightSupported, false);
@@ -89,8 +110,9 @@ test('/api/accounts 走对外投影，不再把 store 数据原样发给浏览�
         source.indexOf("app.get('/api/accounts/code-health'"),
     );
     assert.ok(listRoute.length > 0);
-    assert.match(listRoute, /toPublicAccountsData\(data, hasWxCredential, getPreflightStatsSnapshot\(\)\)/);
+    assert.match(listRoute, /toPublicAccountsData\(data, hasWxCredential, getPreflightStatsSnapshot\(\), canRecoverAccount\)/);
     assert.match(listRoute, /require\('..\/..\/services\/wx-credential'\)/);
+    assert.match(listRoute, /const \{ canRecoverAccount \} = require\('..\/..\/services\/wx-keepalive'\)/);
     assert.match(source, /const \{ getPreflightStatsSnapshot \} = require\('..\/..\/services\/preflight-stats'\)/);
     assert.doesNotMatch(listRoute, /res\.json\(\{ ok: true, data \}\)/);
 });

@@ -1,14 +1,25 @@
 export {};
 /**
- * 微信授权续期。
+ * 微信授权续期（分层）。
  *
- * 续期链路：refreshtoken → 新 accessToken + loginBuffer → 新游戏登录 Code。
- * 游戏 Code 是一次性的，所以每次续期都要重新签发并写回账号，供下一次启动使用；
- * refreshtoken 是滚动凭证，刷新成功后旧值立即失效，失败也必须把新值落盘。
+ * 续期链路分成两级，用途完全不同，早期实现把它们揉在一起，代价是每次保活
+ * 都顺手取一遍 loginBuffer、换一遍 Code、再重启一次连接：
+ *
+ *   1. renewOAuthToken —— 只滚 access/refresh token。后台保活走这条，
+ *      不取 loginBuffer、不换 Code、不重启。官方续期只需要 token 滚动到
+ *      下一轮，buffer 等真正要换 Code 时再取（YYB-Go-Enhanced 的 keepalive
+ *      也是这个立场：buffer recovery happens on demand）。
+ *   2. refreshAccountCredential —— token + loginBuffer + Code 全链路。
+ *      只在「确实缺 Code」时调用：掉线重登、用户手动续期、补 Code 失败兜底。
+ *
+ * 错误一律过 recovery-policy 分类：`-14` 不滚 token，`-109` 直接判需要重新扫码，
+ * 其余按剩余寿命退避。这样才不会出现「AppID 拒绝 → 重新登录 → 更频繁被拒」的
+ * 反向循环。
  */
 
 const store = require('../models/store');
 const { WxLoginService } = require('./wx-login/service');
+const { classifyProtocolError } = require('./wx-login/recovery-policy');
 
 const TARGET_APP_ID = 'wx5306c5978fdb76e4';
 const wxLogin = new WxLoginService();
@@ -22,6 +33,12 @@ export interface CredentialRefreshResult {
     error?: string;
     /** 失败但凭证已滚动时的最新授权到期时间。 */
     expiresAt?: number;
+    /** 服务端已明确吊销凭证：只能重新扫码，自动重试不会成功。 */
+    needsRescan?: boolean;
+    /** 协议错误分类（application_rejected / refresh_rejected / transient ...）。 */
+    kind?: string;
+    /** 本次是否真的拿到了新 Code。仅滚 token 的续期为 false。 */
+    codeIssued?: boolean;
 }
 
 function hasWxCredential(account: any): boolean {
@@ -65,13 +82,73 @@ function getAccountById(accountId: unknown): any {
     return accounts.find((account: any) => String(account.id) === String(accountId)) || null;
 }
 
-function issueCodeFromLoginBuffer(loginBuffer: string): Promise<string> {
-    return wxLogin.issueCode({ loginBuffer } as any, TARGET_APP_ID);
+/** 带账号维度的换码：会话缓存命中时不占登录预算，未命中才走预算闸门。 */
+function issueCodeFromLoginBuffer(loginBuffer: string, accountId?: unknown): Promise<string> {
+    return wxLogin.issueCode({ loginBuffer } as any, TARGET_APP_ID, accountId === undefined ? undefined : String(accountId));
+}
+
+async function doRenewOAuthToken(accountId: unknown): Promise<CredentialRefreshResult> {
+    const account = getAccountById(accountId);
+    const accountName = String((account && (account.name || account.nick)) || accountId || '');
+    if (!account) return { ok: false, accountId: String(accountId || ''), accountName, error: '账号不存在' };
+    if (String(account.platform || '') !== 'wx') {
+        return { ok: false, accountId: String(account.id), accountName, error: '仅微信账号支持授权续期' };
+    }
+    if (!hasWxCredential(account)) {
+        const error = '账号缺少微信刷新凭证，请重新扫码登录';
+        store.addOrUpdateAccount({
+            id: String(account.id),
+            wxCredentialLastAttemptAt: Date.now(),
+            wxCredentialRefreshError: error,
+            wxCredentialNeedsRescan: true,
+        } as any);
+        return { ok: false, accountId: String(account.id), accountName, error, needsRescan: true, kind: 'refresh_rejected' };
+    }
+
+    const attemptedAt = Date.now();
+    try {
+        const oauth = await wxLogin.refreshOAuthToken({
+            openid: account.wxid,
+            refreshtoken: account.refreshtoken,
+            accesstoken: account.accesstoken,
+        });
+        // 只滚 token：loginBuffer 保持原样，等真需要 Code 时再按需换。
+        store.addOrUpdateAccount({
+            id: String(account.id),
+            refreshtoken: oauth.refreshtoken,
+            accesstoken: oauth.accesstoken,
+            expires_in: oauth.expires_in,
+            expires_at: oauth.expires_at,
+            wxCredentialRefreshedAt: oauth.refreshedAt,
+            wxCredentialLastAttemptAt: attemptedAt,
+            wxCredentialRefreshError: '',
+            wxCredentialNeedsRescan: false,
+        } as any);
+        return { ok: true, accountId: String(account.id), accountName, expiresAt: oauth.expires_at, codeIssued: false };
+    }
+    catch (error: any) {
+        const info = classifyProtocolError(error);
+        store.addOrUpdateAccount({
+            id: String(account.id),
+            wxCredentialLastAttemptAt: attemptedAt,
+            wxCredentialRefreshError: info.message,
+            ...(info.needsRescan ? { wxCredentialNeedsRescan: true } : {}),
+        } as any);
+        return {
+            ok: false,
+            accountId: String(account.id),
+            accountName,
+            error: info.message,
+            expiresAt: Number(account.expires_at) || undefined,
+            needsRescan: info.needsRescan,
+            kind: info.kind,
+        };
+    }
 }
 
 /**
  * 续期单个账号的微信授权，并把新 Code 与滚动凭证写回账号。
- * 缺少 refreshtoken 的账号（旧数据或扫码时未回传）直接返回可读的失败原因。
+ * 只在「确实需要新 Code」时使用；日常保活请用 renewOAuthToken。
  */
 async function doRefreshAccountCredential(accountId: unknown): Promise<CredentialRefreshResult> {
     const account = getAccountById(accountId);
@@ -88,8 +165,9 @@ async function doRefreshAccountCredential(accountId: unknown): Promise<Credentia
             id: String(account.id),
             wxCredentialLastAttemptAt: Date.now(),
             wxCredentialRefreshError: error,
-        });
-        return { ok: false, accountId: String(account.id), accountName, error };
+            wxCredentialNeedsRescan: true,
+        } as any);
+        return { ok: false, accountId: String(account.id), accountName, error, needsRescan: true, kind: 'refresh_rejected' };
     }
 
     const attemptedAt = Date.now();
@@ -101,7 +179,7 @@ async function doRefreshAccountCredential(accountId: unknown): Promise<Credentia
             accesstoken: account.accesstoken,
         });
         refreshed = credential;
-        const code = await issueCodeFromLoginBuffer(credential.loginBuffer);
+        const code = await issueCodeFromLoginBuffer(credential.loginBuffer, account.id);
         if (!code) throw new Error('微信授权已续期，但未取到新的游戏登录 Code');
         store.addOrUpdateAccount({
             id: String(account.id),
@@ -115,9 +193,11 @@ async function doRefreshAccountCredential(accountId: unknown): Promise<Credentia
             wxCredentialRefreshedAt: credential.refreshedAt,
             wxCredentialLastAttemptAt: attemptedAt,
             wxCredentialRefreshError: '',
-        });
-        return { ok: true, accountId: String(account.id), accountName, code, expiresAt: credential.expires_at };
-    } catch (error: any) {
+            wxCredentialNeedsRescan: false,
+        } as any);
+        return { ok: true, accountId: String(account.id), accountName, code, expiresAt: credential.expires_at, codeIssued: true };
+    }
+    catch (error: any) {
         // refreshtoken 一旦被服务端刷新就立即作废旧值：即使后续换 Code 失败，
         // 也必须把新 token / loginBuffer 落盘，否则账号里留着死 token，
         // 之后每次续期都会失败（用户看到的“续期一直失败”）。
@@ -132,6 +212,7 @@ async function doRefreshAccountCredential(accountId: unknown): Promise<Credentia
             }
             : null);
         const message = String((error && error.message) || '微信授权续期失败');
+        const info = classifyProtocolError(error);
         store.addOrUpdateAccount({
             id: String(account.id),
             ...(rotated
@@ -146,24 +227,28 @@ async function doRefreshAccountCredential(accountId: unknown): Promise<Credentia
                 : {}),
             wxCredentialLastAttemptAt: attemptedAt,
             wxCredentialRefreshError: message,
-        });
+            ...(info.needsRescan ? { wxCredentialNeedsRescan: true } : {}),
+        } as any);
         return {
             ok: false,
             accountId: String(account.id),
             accountName,
             error: message,
             expiresAt: rotated ? rotated.expires_at : Number(account.expires_at) || undefined,
+            needsRescan: info.needsRescan,
+            kind: info.kind,
+            codeIssued: false,
         };
     }
 }
 
 /**
- * 启动前获取新鲜的游戏 Code（老版 issueFarmCode 策略）。
+ * 启动前 / 掉线后获取新鲜的游戏 Code（老版 issueFarmCode 策略）。
  *
- * 老版换码链路：loginBuffer 是长效凭证，未过期时直接用它换 Code，
- * 不消耗滚动 token；只有 loginBuffer 缺失/明确过期/被服务端拒绝
- * （ManualAuth rejected / 服务端未返回 code）且存在 refreshtoken 时，
- * 才走 refreshtoken 滚动续期后再换。
+ * loginBuffer 是长效凭证，未过期时直接用它换 Code，**完全不碰 OAuth 层**；
+ * 只有 loginBuffer 缺失 / 已过期 / 被服务端拒绝（ManualAuth rejected）且存在
+ * refreshtoken 时，才走滚动续期后再换。这条「能用 buffer 就不动 token」的顺序
+ * 很关键：它让绝大多数掉线恢复都是零 OAuth 调用的。
  */
 async function doEnsureFreshGameCode(accountId: unknown): Promise<CredentialRefreshResult> {
     const account = getAccountById(accountId);
@@ -182,49 +267,84 @@ async function doEnsureFreshGameCode(accountId: unknown): Promise<CredentialRefr
             id: String(account.id),
             wxCredentialLastAttemptAt: Date.now(),
             wxCredentialRefreshError: error,
-        });
-        return { ok: false, accountId: String(account.id), accountName, error };
+            wxCredentialNeedsRescan: true,
+        } as any);
+        return { ok: false, accountId: String(account.id), accountName, error, needsRescan: true, kind: 'refresh_rejected' };
     }
 
     const attemptedAt = Date.now();
     const expiresAt = Number(account.expires_at) || 0;
     const expired = expiresAt > 0 && expiresAt <= attemptedAt;
 
-    // 1) loginBuffer 可用时直接换 Code（不触发滚动续期）。
+    // 1) loginBuffer 可用时直接换 Code（不触发滚动续期、不消耗 OAuth 额度）。
     if (loginBuffer && (!expired || !refreshToken)) {
         try {
-            const code = await issueCodeFromLoginBuffer(loginBuffer);
+            const code = await issueCodeFromLoginBuffer(loginBuffer, account.id);
             if (!code) throw new Error('服务端未返回 code');
             store.addOrUpdateAccount({
                 id: String(account.id),
                 code,
                 wxCredentialLastAttemptAt: attemptedAt,
                 wxCredentialRefreshError: '',
-            });
-            return { ok: true, accountId: String(account.id), accountName, code, expiresAt: expiresAt || undefined };
-        } catch (error: any) {
+                wxCredentialNeedsRescan: false,
+            } as any);
+            return { ok: true, accountId: String(account.id), accountName, code, expiresAt: expiresAt || undefined, codeIssued: true };
+        }
+        catch (error: any) {
             const message = String(error?.message || '换取游戏 Code 失败');
-            // 与老版一致：未过期却被拒（ManualAuth rejected / 服务端未返回 code）
-            // 且可续期 → 落到滚动续期重试；其余错误直接报告。
-            if (!refreshToken || !/ManualAuth rejected|服务端未返回 code/.test(message)) {
+            // 只有「ticket 被拒 / 服务端未返回 code」才值得滚一次 token 重试；
+            // -14（AppID 拒绝）与 -109（凭证已吊销）都不该再动 OAuth 层。
+            const retryWithFreshTicket = refreshToken && /ManualAuth rejected|服务端未返回 code/.test(message)
+                && !/-109|42007|40030|42002/.test(message);
+            if (!retryWithFreshTicket) {
+                const info = classifyProtocolError(error);
                 store.addOrUpdateAccount({
                     id: String(account.id),
                     wxCredentialLastAttemptAt: attemptedAt,
                     wxCredentialRefreshError: message,
-                });
-                return { ok: false, accountId: String(account.id), accountName, error: message, expiresAt: expiresAt || undefined };
+                    ...(info.needsRescan ? { wxCredentialNeedsRescan: true } : {}),
+                } as any);
+                return {
+                    ok: false,
+                    accountId: String(account.id),
+                    accountName,
+                    error: message,
+                    expiresAt: expiresAt || undefined,
+                    needsRescan: info.needsRescan,
+                    kind: info.kind,
+                    codeIssued: false,
+                };
             }
         }
     }
 
     // 2) 滚动续期：refreshtoken → 新 accessToken/loginBuffer → 新 Code。
     //    调用无锁内部版本：当前已经在锁内，避免同账号重入死锁。
-    return doRefreshAccountCredential(accountId);
+    const refreshed = await doRefreshAccountCredential(accountId);
+    // 换回来的 buffer 与原来一字不差，说明服务端没给新 ticket，再试也是同一个结果。
+    if (refreshed && refreshed.ok && loginBuffer) {
+        const latest = getAccountById(account.id);
+        if (latest && String(latest.loginBuffer || '') === loginBuffer && !refreshed.code) {
+            return {
+                ...refreshed,
+                ok: false,
+                error: '重新取到的登录凭证与原来一致，服务端未签发新 ticket，请重新扫码',
+                needsRescan: true,
+                kind: 'ticket_rejected',
+            };
+        }
+    }
+    return refreshed;
 }
 
 /** 对外入口统一串行化，所有续期/换码调用方共享同一把账号锁。 */
 function refreshAccountCredential(accountId: unknown): Promise<CredentialRefreshResult> {
     return withAccountCredentialLock(accountId, () => doRefreshAccountCredential(accountId));
+}
+
+/** 只滚 OAuth token（后台保活专用）：不取 loginBuffer、不换 Code、不重启。 */
+function renewOAuthToken(accountId: unknown): Promise<CredentialRefreshResult> {
+    return withAccountCredentialLock(accountId, () => doRenewOAuthToken(accountId));
 }
 
 function ensureFreshGameCode(accountId: unknown): Promise<CredentialRefreshResult> {
@@ -237,5 +357,6 @@ module.exports = {
     hasRenewableCredential,
     issueCodeFromLoginBuffer,
     refreshAccountCredential,
+    renewOAuthToken,
     ensureFreshGameCode,
 };

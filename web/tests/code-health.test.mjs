@@ -52,7 +52,7 @@ test('后端注册 Code 健康快照与自动补 Code 路由，并接上局内�
 })
 
 test('Code 判定服务覆盖微信到期与 QQ 掉线两类信号', () => {
-  assert.match(service, /WARNING_WINDOW_MS = 45 \* 60_000/)
+  assert.match(service, /WARNING_WINDOW_MS = 10 \* 60_000/)
   assert.match(service, /OFFLINE_LOG_ACTIONS = new Set\(\[[\s\S]*?'disconnect_stop'[\s\S]*?'auto_code_refresh_failed'[\s\S]*?\]\)/)
   assert.match(service, /ensureFreshGameCode\(id\)/, '微信走免扫码换码')
   assert.match(service, /tryRefreshQqGameCode\(id\)/, 'QQ 走尽力重签')

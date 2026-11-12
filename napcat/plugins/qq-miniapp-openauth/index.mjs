@@ -83,7 +83,14 @@ export async function plugin_init(ctx) {
     const service = misc(ctx);
     if (!service) return res.status(503).json({ ok: false, error: 'QQ NodeMiscService is not ready' });
     const attempts = [];
-    for (const operation of ['checkSessionForMiniApp', 'loginWithAppId', 'getOpenCodeWithAppId', 'getOpenAuth']) {
+    // 顺序有讲究：`getOpenAuth` 必须排第一。
+    //   1. 它是 NapCat 4.18.x / QQ 9.9.37 上唯一确认存在的入口
+    //      （NodeIKernelNodeMiscService 的接口声明里只有它，其余三个名字在当前版本上不存在）；
+    //   2. 它的第一个参数传 true 表示「要新的 Code」，而 `checkSessionForMiniApp`
+    //      语义是查已有会话，很可能返回上一轮已经被 worker 消费掉的旧 Code —— 那种
+    //      Code 写进账号后连接会被网关拒绝，要等下一轮才能自愈。
+    // 后三个是更早版本 NapCat 的命名，保留为兜底，但不再优先。
+    for (const operation of ['getOpenAuth', 'checkSessionForMiniApp', 'loginWithAppId', 'getOpenCodeWithAppId']) {
       if (typeof service[operation] !== 'function') continue;
       try {
         const value = operation === 'getOpenAuth' ? await service[operation](true, appId) : await service[operation](appId);

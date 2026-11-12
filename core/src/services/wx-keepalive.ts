@@ -1,38 +1,52 @@
 export {};
 /**
- * 账号在线保障（微信账号）。
+ * 账号在线保障。
  *
- * - 到期前预防性续期（常开）：后端自主按 expires_at 在到期前主动滚动续期并重启，
- *   不依赖浏览器是否打开、也不依赖用户是否停在「账号管理」页。这是老版本
- *   auto-code-refresh 的「后端 scheduler + onlyIfDue 只在到期前刷」思路，
- *   执行器换成现版本更稳的 refreshAccountCredential（自带同账号串行锁、
- *   滚动 token 落盘、expires_at 写回）。日熔断额度只统计失败，成功的常规
- *   续期不占额度，避免凭证按 2 小时滚动时一天内被过早限流。
- * - 掉线重登（可选）：账号因断开或被踢下线而停止后，等待 N 秒自动换 Code 并重新启动。
+ * 模型整体换成 YYB-Go-Enhanced 的 keepalive：**后台只滚令牌，不换 buffer、不重启**。
  *
- * 到期前预防续期只对微信账号生效（只有微信有滚动凭证与 expires_at）；掉线重登
- * 对两类账号都生效 —— 微信走 refreshtoken 滚动续期，QQ 走 NapCat 免扫码重签。
- * 扫码时未回传 refreshtoken、仅有 loginBuffer 的微信账号无法滚动续期，
- * NapCat 不支持重签的 QQ 账号同样只能重新扫码，这两种情况会留下明确日志。
+ * 为什么要这么改：原来到期前 45 分钟就去打 `pcyyb_refresh_token_auth`，
+ * 拿到新 token 后顺手再取一次 loginBuffer、换一次 Code、把账号连接重启一遍。
+ * 三个后果叠在一起：
+ *   - 提前 45 分钟续期，远早于官方约 4 分钟的续期窗口，属于「窗口外空打」；
+ *   - 每 2 小时重启一次连接，面板上看起来就像「频繁掉线」；
+ *   - 每次续期多打一次 login_buffer 接口，而决定授权存活的是 OAuth 层调用次数。
+ *
+ * 现在的分工：
+ *   - 到期前 5 分钟（对齐官方 4 分钟窗口，留 1 分钟余量）只滚 token，连接不动；
+ *   - Code 在真正需要时按需换：掉线重登先拿 loginBuffer 直接换（零 OAuth 调用），
+ *     只有 buffer 被拒才滚一次 token；
+ *   - 失败按剩余寿命动态退避（30 秒 ~ 5 分钟，已过期为 15 分钟），
+ *     凭证被明确吊销则立刻停止自动重试并提示重新扫码；
+ *   - 掉线重登仍保留一小时 5 次、超限暂停 30 分钟的次数闸门。
  */
 
 const store = require('../models/store');
 const { normalizeAutoCodeRefresh, DEFAULT_AUTO_CODE_REFRESH } = require('../config/config');
-const { refreshAccountCredential, hasWxCredential } = require('./wx-credential');
+const { refreshAccountCredential, renewOAuthToken, ensureFreshGameCode, hasWxCredential } = require('./wx-credential');
 const { tryRefreshQqGameCode, isQqCodeRefreshConfigured } = require('./qq-credential');
 const { inspectAccountCodeHealth } = require('./code-watch');
+const { classifyProtocolError, computeRefreshBackoff, REFRESH_BACKOFF_MS } = require('./wx-login/recovery-policy');
 
-/** 30 秒巡检一次，比老版本 wx_keepalive 的 60 秒更勤；成功续期会推进 expires_at，不会重复刷。 */
-const TICK_MS = 30_000;
-/** 到期前预警窗口：与 code-watch.WARNING_WINDOW_MS、老版本 WX_CREDENTIAL_REFRESH_WINDOW_MS 一致。 */
-const PREFLIGHT_WINDOW_MS = 45 * 60_000;
-/** 老版本 MAX_DAILY_RECOVERIES：按 UTC+8 自然日限制单账号「失败」次数，避免打爆续期接口。
- *  成功的常规预防续期不占额度：凭证每 2 小时到期，一天可能触发十几次，按成功计数会过早熔断。 */
+/** 60 秒巡检一次；配合 5 分钟窗口，从到期前 5 分钟起最多有 5 次机会命中。 */
+const TICK_MS = 60_000;
+/**
+ * 到期前多久滚 token。
+ *
+ * 官方续期窗口约 4 分钟（YYB-Go-Enhanced 的注释：「A five-minute delay would skip
+ * the entire official four-minute window」）。提前 45 分钟属于窗口外空打，
+ * 有延时失效的记录；这里取 5 分钟，比官方窗口多 1 分钟余量。
+ */
+const RENEW_AHEAD_MS = 5 * 60_000;
+/** 兼容旧名：预警窗口与续期窗口现在是同一个值。 */
+const PREFLIGHT_WINDOW_MS = RENEW_AHEAD_MS;
+/** 兼容旧名：失败后的默认退避（对应 Go 的 keepAliveRetryBackoff）。 */
+const PREFLIGHT_RETRY_MS = REFRESH_BACKOFF_MS;
+/** 同一账号两次续期之间的最小间隔，避免一次 tick 内重复触发。 */
+const PREFLIGHT_MIN_INTERVAL_MS = TICK_MS;
+/** 按 UTC+8 自然日限制单账号「失败」次数（成功不占额度）。 */
 const MAX_DAILY_PREFLIGHT_FAILURES = 8;
-/** 老版本 MAX_CONSECUTIVE_FAILURES：连续失败熔断。 */
+/** 连续失败熔断。 */
 const MAX_CONSECUTIVE_FAILURES = 3;
-/** 老版本 WX_CREDENTIAL_RETRY_MS：失败后 5 分钟内不重复打续期接口。 */
-const PREFLIGHT_RETRY_MS = 5 * 60_000;
 
 interface KeepAliveDeps {
     restartWorker?: (account: any) => void;
@@ -67,17 +81,19 @@ interface PreflightState {
     failuresToday: number;
     /** 连续失败次数，成功一次即清零。 */
     failures: number;
-    /** 上次尝试时间：两次续期之间至少间隔 PREFLIGHT_RETRY_MS，失败时即为冷却起点。 */
+    /** 上次尝试时间：两次续期之间至少间隔一个 tick。 */
     lastAttemptAt: number;
+    /** 退避截止时间：由剩余寿命动态算出，未到点不重试。 */
+    retryAt: number;
 }
 
 /**
- * 到期前预防性续期的限速 / 熔断状态机。移植老版本 auto-code-refresh.js 的
- * MAX_DAILY_RECOVERIES(8) / MAX_CONSECUTIVE_FAILURES(3) 与 UTC+8 自然日计数，
- * 失败后再叠加 5 分钟冷却，避免反复消耗一次性 refreshtoken。
+ * 到期前续期的限速 / 熔断状态机。
  *
- * 与老版本的关键差别：日额度只统计「失败」。常规预防续期本来就该一直成功，
- * 若成功也占额度，凭证按 2 小时滚动时当天后段会被误熔断，反而更容易过期。
+ * 与旧实现的关键差别是退避不再固定 5 分钟，而是按 token 剩余寿命算：
+ * `min(5 分钟, max(30 秒, 剩余 / 2))`。理由很直接——官方续期窗口只有约 4 分钟，
+ * 固定等 5 分钟会整窗错过；而剩余寿命还长时，早点退避能省掉无意义的请求。
+ * 凭证被明确吊销时不退避，直接把当日额度用满，等同「今天不再自动重试」。
  */
 function createPreflightGovernor(nowFn: () => number = Date.now) {
     const states = new Map<string, PreflightState>();
@@ -85,7 +101,7 @@ function createPreflightGovernor(nowFn: () => number = Date.now) {
         const date = new Date(now + 8 * 3600_000).toISOString().slice(0, 10);
         const existing = states.get(id);
         if (existing && existing.date === date) return existing;
-        const fresh: PreflightState = { date, failuresToday: 0, failures: 0, lastAttemptAt: 0 };
+        const fresh: PreflightState = { date, failuresToday: 0, failures: 0, lastAttemptAt: 0, retryAt: 0 };
         states.set(id, fresh);
         return fresh;
     }
@@ -93,26 +109,42 @@ function createPreflightGovernor(nowFn: () => number = Date.now) {
         canAttempt(id: string, now: number = nowFn()): boolean {
             const state = stateOf(id, now);
             if (state.failuresToday >= MAX_DAILY_PREFLIGHT_FAILURES || state.failures >= MAX_CONSECUTIVE_FAILURES) return false;
-            return !state.lastAttemptAt || now - state.lastAttemptAt >= PREFLIGHT_RETRY_MS;
+            if (state.retryAt > now) return false;
+            return !state.lastAttemptAt || now - state.lastAttemptAt >= PREFLIGHT_MIN_INTERVAL_MS;
         },
-        /** 标记「开始一次尝试」：只记时间做最短间隔防抖，不占用日额度。
-         *  额度只在 recordFailure 里累加，成功的常规续期永远不消耗额度。 */
+        /** 标记「开始一次尝试」：只记时间做最短间隔防抖，不占用日额度。 */
         recordAttempt(id: string, now: number = nowFn()): void {
             stateOf(id, now).lastAttemptAt = now;
         },
-        /** 成功只清「连续失败」；日额度与冷却都不动。 */
+        /** 成功只清「连续失败」与退避；日额度与上次尝试时间都不动。 */
         recordSuccess(id: string, now: number = nowFn()): void {
-            stateOf(id, now).failures = 0;
-        },
-        recordFailure(id: string, error: unknown, now: number = nowFn()): void {
             const state = stateOf(id, now);
+            state.failures = 0;
+            state.retryAt = 0;
+        },
+        /**
+         * 记一次失败。
+         * @param id 账号 id。
+         * @param error 失败原因（用于分类，决定是否直接熔断）。
+         * @param now 当前时间。
+         * @param remainingMs token 剩余寿命；undefined 表示未知，0 表示已过期。
+         */
+        recordFailure(id: string, error: unknown, now: number = nowFn(), remainingMs?: number): void {
+            const state = stateOf(id, now);
+            const info = classifyProtocolError(error);
             state.failuresToday += 1; // 日额度只统计失败
             state.failures += 1;
-            state.lastAttemptAt = now; // 失败冷却 5 分钟
-            // 凭证已失效 / 需要重新扫码：继续重试只会反复打接口，直接熔断到当天结束。
-            if (/重新扫码|凭证.*(?:失效|过期)|token.*(?:expired|invalid)/i.test(String(error || ''))) {
+            state.lastAttemptAt = now;
+            if (info.definitive) {
+                // 凭证已吊销：继续重试只会反复被拒，直接熔断到当天结束。
                 state.failures = MAX_CONSECUTIVE_FAILURES;
+                state.retryAt = now + 15 * 60_000;
+                return;
             }
+            // 剩余寿命未知的传输错误用默认退避，不要套「已过期」的 15 分钟。
+            state.retryAt = now + (remainingMs === undefined
+                ? REFRESH_BACKOFF_MS
+                : computeRefreshBackoff(remainingMs, info));
         },
         snapshot(id: string, now: number = nowFn()): PreflightState {
             return { ...stateOf(id, now) };
@@ -126,10 +158,13 @@ const preflight = createPreflightGovernor();
 /**
  * 与 code-watch 共用同一套到期判定（秒/毫秒兼容、以最近一次成功时间补算），
  * 避免两处逻辑分叉。remainingMs 为 0 表示已过期或暂无到期信息，都值得尝试一次。
- * 老版本 shouldRefreshWxCredential / onlyIfDue 的等价实现。
  */
 function isCredentialDue(account: any, now: number = Date.now()): boolean {
     return inspectAccountCodeHealth(account, { now }).remainingMs <= PREFLIGHT_WINDOW_MS;
+}
+
+function credentialRemainingMs(account: any, now: number = Date.now()): number {
+    return inspectAccountCodeHealth(account, { now }).remainingMs;
 }
 
 function listWxAccounts(): any[] {
@@ -142,7 +177,7 @@ function findAccount(accountId: unknown): any {
 
 /**
  * 把一次「后端自动发起」的续期结果写进持久化账本。
- * 只记 preflight（到期前预防，常开）和 offline（掉线重登）；用户在面板上
+ * 只记 preflight（到期前滚令牌，常开）和 offline（掉线重登）；用户在面板上
  * 手动点「续期全部微信授权」不算无人值守，不进账。账本异常不影响续期结果。
  */
 function recordAutomaticResult(accountId: string, reason: 'offline' | 'manual' | 'preflight', ok: boolean, now: number): void {
@@ -168,28 +203,47 @@ function platformOf(account: any): 'wx' | 'qq' {
     return String(account && account.platform || '') === 'wx' ? 'wx' : 'qq';
 }
 
+function nameOf(account: any, key: string): string {
+    return String((account && (account.name || account.nick)) || key || '');
+}
+
 /**
  * 掉线后能不能免扫码自愈。
  *
- * 微信要有滚动凭证（wxid + refreshtoken）；QQ 没有滚动凭证，只能靠 NapCat
- * 用当前已登录会话重签 Code，所以要求 NapCat 接口已配置。这里的准入条件是
- * 「能不能自动补 Code」，不是「是不是微信」—— 早期实现只认微信，QQ 账号掉线后
- * 永远不会被拉起，表现就是「掉线了就一直离线」。
+ * 微信要有可换 Code 的长效凭证（loginBuffer 或 refreshtoken 任一即可 ——
+ * 只有 loginBuffer 也能直接换 Code，不必非得能滚 token）；QQ 没有长效凭证，
+ * 只能靠 NapCat 用当前已登录会话重签，所以要求 NapCat 接口已配置。
  */
 function canRecoverAccount(account: any): boolean {
     if (!account) return false;
-    if (platformOf(account) === 'wx') return hasWxCredential(account);
+    if (platformOf(account) === 'wx') return hasWxCredential(account) || !!String(account.loginBuffer || '').trim();
     return isQqCodeRefreshConfigured();
 }
 
-/** 按平台取一次新 Code：微信滚动续期，QQ 走 NapCat 重签。 */
-async function refreshCredentialFor(account: any, key: string): Promise<{ ok: boolean; accountName: string; error?: string }> {
-    const accountName = String((account && (account.name || account.nick)) || key || '');
-    if (platformOf(account) === 'wx') {
-        return await refreshAccountCredential(key);
+/**
+ * 分级续期：不同原因走完全不同的链路，这是本次改造的核心。
+ *
+ *   preflight —— 只滚 OAuth token。不取 loginBuffer、不换 Code、不重启连接。
+ *   manual    —— token + loginBuffer + Code 全链路（用户点了按钮，期望立刻能用）。
+ *   offline   —— 先拿 loginBuffer 直接换 Code（零 OAuth 调用）；被拒才滚一次 token。
+ */
+async function renewFor(account: any, key: string, reason: 'offline' | 'manual' | 'preflight'): Promise<any> {
+    const accountName = nameOf(account, key);
+    if (platformOf(account) === 'qq') {
+        const result = await tryRefreshQqGameCode(key);
+        return { ok: !!result?.ok, accountName, error: result && result.error, codeIssued: !!result?.ok };
     }
-    const result = await tryRefreshQqGameCode(key);
-    return { ok: !!(result && result.ok), accountName, error: result && result.error };
+    if (reason === 'preflight') {
+        const result = await renewOAuthToken(key);
+        return { ...result, accountName: result?.accountName || accountName, codeIssued: false };
+    }
+    if (reason === 'manual') {
+        const result = await refreshAccountCredential(key);
+        return { ...result, accountName: result?.accountName || accountName };
+    }
+    // offline：buffer 优先，只有被服务端拒绝时才动用 refresh token。
+    const result = await ensureFreshGameCode(key);
+    return { ...result, accountName: result?.accountName || accountName };
 }
 
 /**
@@ -249,65 +303,111 @@ function reserveReconnectSlot(accountId: string, now: number): { allowed: boolea
 
 /**
  * 续期 + 按需重启。同一账号同时只允许一个续期任务，避免滚动 token 互相覆盖。
+ * 只有掉线重登在成功后才重启连接；到期前滚令牌与手动续期都不动连接。
  */
 async function refreshAndMaybeRestart(accountId: unknown, reason: 'offline' | 'manual' | 'preflight', now: number = Date.now()): Promise<boolean> {
     const key = String(accountId);
     if (inFlight.has(key)) return false;
     const account = findAccount(key);
-    if (!canRecoverAccount(account)) return false;
+    if (!account) return false;
+    if (reason === 'offline' && !canRecoverAccount(account)) return false;
+    if (reason !== 'offline' && platformOf(account) === 'wx' && !hasWxCredential(account)) return false;
     inFlight.add(key);
+    const isPreflight = reason === 'preflight';
     try {
-        const result = await refreshCredentialFor(account, key);
-        const isPreflight = reason === 'preflight';
-        if (!result.ok) {
-            const message = `账号 ${result.accountName} 续期失败：${result.error || '未知错误'}`;
-            log('错误', message, { accountId: key, accountName: result.accountName, reason });
-            if (isPreflight) preflight.recordFailure(key, result.error, now);
+        const result = await renewFor(account, key, reason);
+        const accountName = String(result?.accountName || nameOf(account, key));
+        if (!result?.ok) {
+            const message = `账号 ${accountName} 续期失败：${result?.error || '未知错误'}`;
+            const needsRescan = !!result?.needsRescan;
+            if (isPreflight) preflight.recordFailure(key, result?.error, now, credentialRemainingMs(account, now));
             recordAutomaticResult(key, reason, false, now);
-            addAccountLog(isPreflight ? 'auto_code_preflight_failed' : 'auto_code_refresh_failed', message, key, result.accountName, { reason });
+            if (needsRescan) {
+                // 凭证已被吊销，但当前会话可能还活着：Go 的做法是降级成 session_only
+                // 继续跑，而不是立刻把账号判死。这里用告警而不是错误来表达这件事。
+                if (isRunning(key)) {
+                    log('系统', `账号 ${accountName} 授权已被服务端吊销，但当前连接仍在线（仅会话模式）；已暂停自动续期，建议尽快重新扫码`, {
+                        accountId: key,
+                        accountName,
+                        reason,
+                    });
+                }
+                else {
+                    log('错误', `账号 ${accountName} 授权已被服务端吊销，自动续期已停止，需要重新扫码`, { accountId: key, accountName, reason });
+                }
+            }
+            else {
+                log('错误', message, { accountId: key, accountName, reason });
+            }
+            addAccountLog(isPreflight ? 'auto_code_preflight_failed' : 'auto_code_refresh_failed', message, key, accountName, { reason, needsRescan });
             return false;
         }
-        const message = platformOf(account) === 'wx'
-            ? `账号 ${result.accountName} 微信授权已续期`
-            : `账号 ${result.accountName} QQ 登录 Code 已重签`;
-        log('系统', message, { accountId: key, accountName: result.accountName, reason });
+
+        const message = platformOf(account) === 'qq'
+            ? `账号 ${accountName} QQ 登录 Code 已重签`
+            : (isPreflight
+                ? `账号 ${accountName} 微信授权已续期（仅滚动令牌，连接保持不变）`
+                : `账号 ${accountName} 微信授权已续期`);
+        log('系统', message, { accountId: key, accountName, reason });
         if (isPreflight) preflight.recordSuccess(key, now);
         recordAutomaticResult(key, reason, true, now);
-        addAccountLog(isPreflight ? 'auto_code_preflight' : 'auto_code_refresh', message, key, result.accountName, { reason });
+        addAccountLog(isPreflight ? 'auto_code_preflight' : 'auto_code_refresh', message, key, accountName, { reason });
 
-        // 预防性续期 / 掉线重登都要立刻用新 Code 重新上线；手动续期只更新 Code。
-        const shouldRestart = reason !== 'manual' && typeof deps.restartWorker === 'function';
-        if (shouldRestart) {
+        // 只有掉线重登需要把新 Code 送上连接；预检只滚令牌，连接不该被打断。
+        if (reason === 'offline' && typeof deps.restartWorker === 'function') {
             const latest = findAccount(key);
             if (latest) {
                 try {
                     deps.restartWorker!(latest);
                 } catch (error: any) {
-                    log('错误', `账号 ${result.accountName} 重启失败: ${error?.message || error}`, { accountId: key });
+                    log('错误', `账号 ${accountName} 重启失败: ${error?.message || error}`, { accountId: key });
                 }
             }
         }
         return true;
-    } finally {
+    }
+    catch (error: any) {
+        // renewFor 的各条分支内部已经做过 try/catch，走到这里说明出现了预期外的异常
+        // （账号文件写入失败、状态机 bug、上游返回了奇怪结构等）。必须在这里收口：
+        //   - 记一次失败，让退避状态前进，否则下一个 tick 会立刻重试，变成看不见的
+        //     循环，把日志和 OAuth 额度一起刷掉；
+        //   - 绝不能让异常冒到调用方：掉线重登那条路径是裸 `void` 调用，冒出去就是
+        //     未处理拒绝，Node 20 默认按致命错误处理，主进程直接退出（全部账号掉线）。
+        const accountName = nameOf(account, key);
+        const message = String((error && error.message) || error || '未知错误');
+        if (isPreflight) preflight.recordFailure(key, error, now, credentialRemainingMs(account, now));
+        recordAutomaticResult(key, reason, false, now);
+        log('错误', `账号 ${accountName} 续期异常：${message}`, { accountId: key, accountName, reason });
+        addAccountLog(
+            isPreflight ? 'auto_code_preflight_failed' : 'auto_code_refresh_failed',
+            `账号 ${accountName} 续期异常：${message}`,
+            key,
+            accountName,
+            { reason },
+        );
+        return false;
+    }
+    finally {
         inFlight.delete(key);
     }
 }
 
 /**
- * 常开的到期前预防性续期通道。返回被触发的账号 id，便于回归测试断言。
- * 与掉线重登共享 inFlight 去重和账号串行锁；滚动续期成功后 expires_at 推进，下一轮自然跳过。
+ * 常开的到期前续期通道。返回被触发的账号 id，便于回归测试断言。
+ * 只滚 token，不换 Code、不重启；与掉线重登共享 inFlight 去重和账号串行锁。
  */
 function runCodePreflight(now: number = Date.now()): Promise<string[]> {
     const triggered: string[] = [];
     const tasks: Promise<boolean>[] = [];
     for (const account of listWxAccounts()) {
         const key = String(account.id);
-        // 只续期「正在运行」的账号：用户手动停止的账号不能被自动拉起
-        // （老版本 versions 代次锁 / manuallyStopped 的等价约束）。
+        // 只处理「正在运行」且能滚 token 的账号：用户手动停止的账号不能被自动拉起，
+        // 只有 loginBuffer 的账号没有 refresh token，滚不了令牌。
         if (!hasWxCredential(account) || !isRunning(key)) continue;
+        // 已经被判定需要重新扫码的账号不再按节奏空转，等用户处理。
+        if (account.wxCredentialNeedsRescan) continue;
         if (inFlight.has(key) || !isCredentialDue(account, now)) continue;
         if (!preflight.canAttempt(key, now)) continue;
-        // 只标记尝试时间（最短间隔防抖）；成功不占日额度，额度由 recordFailure 在失败时累加。
         preflight.recordAttempt(key, now);
         triggered.push(key);
         tasks.push(refreshAndMaybeRestart(key, 'preflight', now));
@@ -318,12 +418,17 @@ function runCodePreflight(now: number = Date.now()): Promise<string[]> {
 function tick(): void {
     if (running) return;
     running = true;
-    try {
-        // 到期前预防性续期常开：不看任何开关、不依赖浏览器，关掉网页后端照样工作。
-        void runCodePreflight(Date.now()).catch(() => {});
-    } finally {
-        running = false;
-    }
+    // runCodePreflight 是异步的，必须等它真正结束才释放 running。旧写法是
+    // `void runCodePreflight(...)` 之后立刻在 finally 里置回 false，互斥形同虚设：
+    // 上一轮还在等上游，下一个 tick 照样进来。以前只靠 inFlight 与退避闸门兜着，
+    // 一旦某次续期卡在网络超时上，就会叠出多条并发续期。
+    runCodePreflight(Date.now())
+        .catch((error: any) => {
+            log('错误', `账号在线保障巡检失败：${String((error && error.message) || error)}`);
+        })
+        .finally(() => {
+            running = false;
+        });
 }
 
 /** 账号掉线（断开 / 被踢下线 / 登录失败）时调用；按配置延时换 Code 并重启。 */
@@ -332,7 +437,7 @@ function notifyAccountOffline(accountId: unknown, reason = 'offline'): void {
     const config = getConfig();
     if (!config.offlineEnabled) return;
     const account = findAccount(key);
-    const accountName = String((account && (account.name || account.nick)) || key);
+    const accountName = nameOf(account, key);
     if (!canRecoverAccount(account)) {
         // 没有可用的免扫码凭证：重登必然失败，直接把原因写清楚，交给用户重新扫码。
         log('系统', `账号 ${accountName} 掉线（${reason}），当前账号没有可免扫码恢复的凭证，需重新扫码或填写新 Code`, {
@@ -375,8 +480,12 @@ function notifyAccountOffline(accountId: unknown, reason = 'offline'): void {
         offlineTimers.delete(key);
         const latest = findAccount(key);
         if (!latest || isRunning(key)) return;
-        addAccountLog('auto_reconnect', `账号 ${latest.name || key} 掉线后尝试自动重登`, key, String(latest.name || key), { reason });
-        void refreshAndMaybeRestart(key, 'offline');
+        addAccountLog('auto_reconnect', `账号 ${nameOf(latest, key)} 掉线后尝试自动重登`, key, nameOf(latest, key), { reason });
+        // 再兜一层 catch：refreshAndMaybeRestart 内部已经收口异常，这里是第二道保险。
+        // 裸 `void` 的拒绝在 Node 20 上按致命错误处理，会直接带走主进程。
+        void refreshAndMaybeRestart(key, 'offline').catch((error: any) => {
+            log('错误', `账号自动重登异常：${String((error && error.message) || error)}`, { accountId: key, reason });
+        });
     }, delayMs);
     if (typeof handle.unref === 'function') handle.unref();
     offlineTimers.set(key, handle);
@@ -388,7 +497,7 @@ function startWxKeepAlive(options: KeepAliveDeps = {}): void {
     timer = setInterval(tick, TICK_MS);
     if (typeof timer.unref === 'function') timer.unref();
     const config = getConfig();
-    log('系统', `账号在线保障已启动：到期前预防性续期常开（每 ${Math.round(TICK_MS / 1000)} 秒检查、到期前 ${Math.round(PREFLIGHT_WINDOW_MS / 60000)} 分钟续期，当日失败上限 ${MAX_DAILY_PREFLIGHT_FAILURES} 次（成功不占额度） / 连续失败 ${MAX_CONSECUTIVE_FAILURES} 次熔断），掉线重登${config.offlineEnabled ? `等待 ${config.offlineDelaySeconds} 秒（微信续期 / QQ 重签，一小时最多 ${RECONNECT_MAX_ATTEMPTS} 次）` : '关闭'}`);
+    log('系统', `账号在线保障已启动：到期前 ${Math.round(RENEW_AHEAD_MS / 60000)} 分钟只滚动授权令牌（不换 Code、不重启连接；每 ${Math.round(TICK_MS / 1000)} 秒检查，失败按剩余寿命退避 30 秒~5 分钟，已过期为 15 分钟），掉线重登${config.offlineEnabled ? `等待 ${config.offlineDelaySeconds} 秒（微信续期 / QQ 重签，一小时最多 ${RECONNECT_MAX_ATTEMPTS} 次）` : '关闭'}`);
 }
 
 function stopWxKeepAlive(): void {
@@ -406,7 +515,7 @@ function stopWxKeepAlive(): void {
 /** 掉线重登配置变更后重新读取一次，把当前生效策略写进系统日志。 */
 function applyWxKeepAliveConfig(): void {
     const config = getConfig();
-    log('系统', `账号在线保障配置已更新：掉线重登${config.offlineEnabled ? `等待 ${config.offlineDelaySeconds} 秒` : '关闭'}，到期前预防性续期常开`);
+    log('系统', `账号在线保障配置已更新：掉线重登${config.offlineEnabled ? `等待 ${config.offlineDelaySeconds} 秒` : '关闭'}，到期前 ${Math.round(RENEW_AHEAD_MS / 60000)} 分钟只滚动授权令牌`);
 }
 
 module.exports = {
@@ -421,8 +530,10 @@ module.exports = {
     canRecoverAccount,
     reserveReconnectSlot,
     getConfig,
+    RENEW_AHEAD_MS,
     PREFLIGHT_WINDOW_MS,
     PREFLIGHT_RETRY_MS,
+    PREFLIGHT_MIN_INTERVAL_MS,
     MAX_DAILY_PREFLIGHT_FAILURES,
     MAX_CONSECUTIVE_FAILURES,
     RECONNECT_WINDOW_MS,
