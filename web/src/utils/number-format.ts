@@ -17,8 +17,14 @@ function formatCompactAmount(value: unknown) {
   const absAmount = Math.abs(amount)
   if (absAmount >= YI_THRESHOLD)
     return `${(amount / YI_THRESHOLD).toFixed(2)}${YI_UNIT}`
-  if (absAmount >= WAN_THRESHOLD)
-    return `${(amount / WAN_THRESHOLD).toFixed(2)}${WAN_UNIT}`
+  if (absAmount >= WAN_THRESHOLD) {
+    // 四舍五入到两位小数后可能正好是 10000.00 万（例如 99,999,999），
+    // 直接输出会变成「10000.00万」——看着像坏了。这种情况进位成「亿」。
+    const wan = Number((amount / WAN_THRESHOLD).toFixed(2))
+    if (Math.abs(wan) >= 10000)
+      return `${(amount / YI_THRESHOLD).toFixed(2)}${YI_UNIT}`
+    return `${wan.toFixed(2)}${WAN_UNIT}`
+  }
   return amount.toLocaleString('zh-CN')
 }
 

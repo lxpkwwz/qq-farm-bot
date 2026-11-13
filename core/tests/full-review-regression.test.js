@@ -92,8 +92,22 @@ test('删除好友被游戏侧拒绝时不能写本地黑名单并回报成功',
 test('种子黑名单与化肥数量不再放行负数 / Infinity', () => {
     const routes = read('src/controllers/admin/farm-routes.ts');
     assert.equal((routes.match(/Number\.isInteger\(seedId\) \|\| seedId <= 0/g) || []).length, 2);
-    assert.match(routes, /Number\.isFinite\(rawCount\) \|\| rawCount < 0/);
-    assert.match(routes, /无效的化肥参数/);
+    // v3.25.3 起统一走 utils/input-guards：原来的 Number.isFinite 手写判断换成带区间的 readInt，
+    // 两种写法都拦 Infinity，这里锁的是「化肥数量必须过区间校验」而不是某一种写法。
+    assert.match(routes, /readInt\(req\.body\?\.count \?\? 0, \{ field: 'count', min: 0, max: 10000 \}\)/);
+    assert.match(routes, /organicThresholdHours: readInt\(/);
+});
+
+test('farm 路由不再把请求体裸传给 worker', () => {
+    const routes = read('src/controllers/admin/farm-routes.ts');
+    // 这些点在 v3.25.3 之前是 `ctx.provider.xxx(id, req.body?.landId)` 这种裸传，
+    // 服务端拿不到校验点，`1e400` 会变成 Infinity 一路编进 int64。
+    for (const field of ['landId', 'itemId', 'landIds']) {
+        assert.match(routes, new RegExp(`read(Id|IdList)\\(req\\.body\\?\\.${field}`), `请求体字段 ${field} 必须先过边界校验`);
+    }
+    assert.doesNotMatch(routes, /ctx\.provider\.fertilizeOwnLand\(id, req\.body\?\.landId/);
+    assert.doesNotMatch(routes, /ctx\.provider\.removePlant\(id, req\.body\?\.landId/);
+    assert.doesNotMatch(routes, /Math\.max\(0, Math\.trunc\(Number\(req\.body/);
 });
 
 test('NapCat 插件配置损坏时拒绝服务，不退回「无 token = 免鉴权」', () => {

@@ -1,17 +1,21 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { createRequire } = require('node:module');
 const vm = require('node:vm');
 const test = require('node:test');
 
 function emailHarness(t) {
-    const dataRoot = path.resolve(__dirname, '../data');
+    // 临时目录必须建在系统临时区：原来建在 core/data 下，等于往用户真实数据目录里
+    // 扔测试垃圾。而 Windows 上 rmSync 遇到仍被打开的文件会抛 EPERM/EBUSY，
+    // 清理一旦失败就永久留下一个目录（实测已累积 27 个）。
+    const dataRoot = path.join(os.tmpdir(), 'qq-farm-email-tests');
     fs.mkdirSync(dataRoot, { recursive: true });
     const dir = fs.mkdtempSync(path.join(dataRoot, 'test-email-'));
     t.after(() => {
         assert.equal(path.dirname(dir), dataRoot);
-        fs.rmSync(dir, { recursive: true, force: true });
+        fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     });
     const clock = { now: Date.parse('2026-11-09T01:59:59Z'), failLists: false, failWrite: false, failWriteAtCall: 0, writeCalls: 0, emails: { 1: [], 2: [] }, interruptClaim: false };
     const methods = [];

@@ -15,6 +15,13 @@
 
 | 版本 | 更新序号 | 日期 | 更新内容 | 提交 |
 | --- | --- | --- | --- | --- |
+| v3.25.10 | #179 | 2026-11-14 | 真实启动整个项目做全量路由扫描，修客户端错误被当成 500、测试写脏真实日志 | — |
+| v3.25.9 | #178 | 2026-11-14 | 测试不再往真实数据目录扔临时文件 | — |
+| v3.25.8 | #177 | 2026-11-14 | 修复 Windows 上原子写偶发 EPERM 导致配置与当日状态丢失的问题 | — |
+| v3.25.7 | #176 | 2026-11-14 | 修复单个 HTTP 请求可打死主进程的问题，并补上真实冒烟与前端逻辑测试 | — |
+| v3.25.6 | #175 | 2026-11-14 | 补齐剩余 5 个零测试模块的 67 条测试，并修掉两处同类边界问题 | — |
+| v3.25.5 | #173 | 2026-11-14 | 为 8 个零测试的高风险模块补 123 条测试，并修复好友 GID 归一化放行 Infinity | — |
+| v3.25.3 | #172 | 2026-11-14 | 修复请求参数以 Infinity 绕过校验，并把外部输入面收成清单闸门 | — |
 | v3.25.2 | #171 | 2026-11-13 | 参数与边界复查：间隔上限缺失、定时器延时溢出、Infinity 放行与管理端口校验 | — |
 | v3.25.1 | #170 | 2026-11-13 | 重构切号竞态：27 处手写序号计数器全部收口到统一请求守卫 | — |
 | v3.25.0 | #169 | 2026-11-13 | 新增防复发门禁：把「未处理 Promise」这类反复出现的问题变成写的时候就报错 | — |
@@ -178,6 +185,103 @@ flowchart TB
 ```
 
 ## 详细记录
+
+### 2026-11-14 · v3.25.10（#179） · 真实启动整个项目做全量路由扫描，修客户端错误被当成 500、测试写脏真实日志
+
+- **起点**：管理员账号确认可用（`data/admin.json` 里就是 `admin/admin`，标记 `mustChangePassword`）。重新构建 web + core，用 `FARM_AUTO_START_ACCOUNTS=0` 启动真实进程（不触发 QQ 登录、不连游戏），登录拿 token 后对**运行中的服务**逐个打路由——这是之前只跑 mock 单测时完全没覆盖的一层。
+- **一次必须记下的失误**：第一版扫描脚本把「跳过写接口」只写进了计数、忘了 `continue`，结果 `DELETE /api/accounts/1` 真的执行了——**真实账号被删**，`store.json` 的主题被改成 dark、账号配置被重写成默认值。运行前做过整目录快照，13 个文件已逐一按哈希还原，`panel_notifications/` 空目录也清掉了。教训：**验证脚本本身要假定它会误伤**，先做快照再决定策略，不能把「跳过」写成注释性的。
+- **改法**：新增 `tests/manual/live-preload.js`，启动前把 `runtime-paths` 指向 `core/data` 的一份副本，服务的读写逻辑照常、只落在副本上；新增 `tests/manual/live-api-sweep.js`（`pnpm test:live`）扫全部路由，写接口按「是否依赖账号上下文」分类——账号增删改 / 系统设置 / 改密码 / 登录一律真跳过，其余带 `x-account-id` 的写接口在账号离线时会停在「账号未运行」，覆盖的是 handler 主体。
+- **抓到的真缺陷**：请求体不是合法 JSON 时返回 **500**。`express.json()` 抛的 `SyntaxError` 自带 `status=400`，而统一错误出口无视了它，一律回 500 —— 用户随手拼错一个括号就会看到「服务端内部错误」。改成读 `err.status`，4xx 按客户端错误回原状态码并给「请求体不是合法 JSON」提示，真正的服务端异常仍然 500 且记 error 级日志。
+- **扫描结果**：171 个路由（含 `mountGet(...)` 这种注册方式），实际请求 143、跳过 28，**0 失败**；不带 token 访问全部 401（免鉴权只有 login / game-version / wx-login）；首页 7 个静态资源全部 200；SPA 深链接回落 `index.html` 正常；60 并发无异常；进程全程存活。
+- **确认不是 bug、有意不动**：`/api/ping` 需要 token —— `app.use('/api', ...)` 注册在它之前，这种 fail-closed 默认是正确的，前端也只在登录后的侧边栏调用；`/api/game-version` 故意免鉴权，`docker-compose.yml` 的 healthcheck 用的就是它；`/api/account-logs` 按前端约定直接返回裸数组，不是漏包 `{ok,data}`。
+- **测试卫生**：清点发现 **15 个测试文件会通过真实 logger 往 `core/data/logs` 追加日志**，一次全量约 21KB（最多的是 `tsdk-runtime` 5.2KB、`farm-multi-season` 3.8KB）。新增 `tests/helpers/isolate-data.js`，在 require 业务模块之前把数据目录指到临时区，15 个文件统一接入；`platform-version-config` 里有两个 `worker_threads` 有独立模块注册表、改 `require.cache` 无效，改用 `LOG_LEVEL=error` 压掉。现在跑完全量测试真实数据**零字节变化**。
+- **闸门**：`core/tests/admin-route-safety.test.js` 新增「客户端错误不能一律回 500」，锁住 `err.status` 读取、4xx 分支与提示文案；缺陷注入验证会红 1 条。
+- **验证**：`pnpm verify` 全绿（core 926 / web 273 / lint 0 / 类型 0），HTTP 冒烟 0 失败，跑完后 `core/data` 与运行前快照逐文件哈希一致。
+
+
+### 2026-11-14 · v3.25.9（#178） · 测试不再往真实数据目录扔临时文件
+
+- **怎么发现的**：清点 `core/data` 时看到一堆 `test-email-XXXXXX/` 目录，共 27 个。查下来只有 `email-daily-persistence.test.js` 的测试脚手架把临时目录建在 `core/data` 下（`mkdtempSync(path.join(dataRoot, 'test-email-'))`），其余测试都建在系统临时区。
+- **为什么会累积**：清理写在 `t.after` 里，但 Windows 上 `fs.rmSync` 遇到仍被打开的文件会抛 `EPERM`/`EBUSY`，`force: true` 并不重试——一次清理失败就永久留下一个目录。这和上一轮修的 `rename` 是同一种锁文件现象。
+- **修法**：脚手架改到 `os.tmpdir()/qq-farm-email-tests`；所有测试的清理统一加 `maxRetries: 5, retryDelay: 50`（`rmSync` 原生支持，就是给 Windows 这种瞬时占用准备的）。已存在的 27 个残留目录一并清掉。
+- **顺带修正一次误判**：清点时以为 `data/store.json` 和 `data/tsdk` 是测试新产生的，查时间戳是 11 月 3–5 日——本来就存在，是我前面用 `ls | head -12` 把输出截断了。**用截断的输出判断「文件是新出现的」是不可靠的**。
+- **验证**：`pnpm verify` 全绿（core 925 / web 273），跑完 `data/` 下不再新增 `test-email-*`。
+
+### 2026-11-14 · v3.25.8（#177） · 修复 Windows 上原子写偶发 EPERM 导致配置与当日状态丢失的问题
+
+- **起点是一次「偶发红」的测试**。上一轮提交后复跑，`email-daily-persistence` 里那条「已取得检查失败结果时，当天重启也不会重复检查」偶尔失败——单独跑 6 次全绿，只跑全量时 4 次里红 2 次。它断言的是「重启后能读到当天 `result: 'error'`」，实际读到空字符串。
+- **顺着症状查到唯一可能的路径**：状态文件在写完后仍留着 `running`。`finishAttempt()` 是同步写盘的，唯一能让它没落地的原因是 `persistState()` 返回 false —— 也就是 `writeTextFileAtomic` 抛了异常。异常被吞掉、只把 `lastError` 加了个后缀，所以表面上「检查失败了」，实际上状态没存。
+- **实测确认了根本原因**（本机 Windows）：只要目标文件被**另一个进程持有读句柄**，`fs.renameSync` 覆盖它就 **200/200 稳定报 `EPERM`**；放开句柄后 200/200 成功。这不是测试环境特有的——杀毒软件、Everything、OneDrive/坚果云同步、编辑器预览都会短暂持有句柄，于是「刚改完的设置重启后没了」「当日统计丢了」这类问题会偶发出现、且无法复现。
+- **量化了一下影响面**：写一个子进程反复占用同一个文件（每 20ms 打开、持有 8ms），主进程连写 60 次——**不重试时失败 22 次（37%）**，加重试后 **60/60 全成功**。
+- **修法**：在 `json-db` 里抽 `renameWithRetry()`，只对 `EPERM` / `EACCES` / `EBUSY` 做有限次退避重试（10/20/40/80/160ms，用 `Atomics.wait` 睡，不烧 CPU），其它错误（磁盘满 `ENOSPC`、路径不存在）**立刻抛出**——不能被重试掩盖。`writeTextFileAtomic` 与 `services/stats.ts` 各自那份原子写都改用这一个实现（同一个概念原来写了两遍）。
+- **诚实的边界**：修复后连跑 9 轮（含高负载 4 个 CPU 占满进程）都没再复现那次偶发，而且探针显示**真实的邮件状态写入路径一次重试都没有触发** —— 所以「这就是那次偶发的原因」**没有被完全证实**，只能说它是唯一能产生该症状的路径，而且这条路径上的脆弱性已经被实验量化并修复。
+- **新增测试** `core/tests/json-db-atomic-write.test.js`（6 条）：`EPERM` 重试后成功、`EBUSY`/`EACCES` 同样重试、`ENOSPC` 只尝试一次且不等待、重试耗尽后抛出且**不留下临时文件**、真实持有句柄场景下文件必须始终是完整 JSON（不能写出半截）。
+- **验证**：`pnpm verify` 全绿（core 919 → **925**、web 273、lint 0、类型检查 0）。
+
+### 2026-11-14 · v3.25.7（#176） · 修复单个 HTTP 请求可打死主进程的问题，并补上真实冒烟与前端逻辑测试
+
+- **这轮第一次真的把服务启动起来发请求**。之前 915 条单测全是 mock 出来的，从没验证过 Express 能不能跑、路由挂没挂上、错误处理是不是 500 —— 这些都是单测的结构性盲区。做法是写一个冒烟脚本：用 `node -r` 预加载把**可写数据目录整体重定向到临时目录**（`runtime-paths` 在 require 阶段就被 logger、`KNOWN_FRIEND_GIDS_DIR`、`admin.json` 用到，事后改来不及），再真实启动 admin 服务，打 50 多个接口（鉴权、只读、写、非法参数、路由边界、账号解析）。跑完核对过 `core/data` 的文件时间戳，全程没碰真实账号数据。
+- **第一个请求就把进程打死了**：`GET /api/friend-blacklist` 抛 `TypeError: friendsList is not iterable`，然后**整个进程退出**，所有账号一起掉线。原因有两层：
+  - `friendsList = await ctx.provider.getFriends(id) || []` —— `||` 只兜住 `null` / `undefined`，provider 返回对象（错误包或空响应）时原样赋值，后面的 `for...of` 就炸；
+  - 那段 `for...of` 在 `try` 之外，而 **Express 4 不捕获 async handler 的 Promise 拒绝** —— 拒绝变成 `unhandledRejection`，Node 默认直接结束进程。
+- **三层修复**：
+  1. **具体缺陷**：抽出 `readFriendsForDisplay()`，用 `Array.isArray` 显式判数组，非数组一律当空列表（两处调用点都改了）；
+  2. **系统性**：新增 `guardAsyncRoutes(app)`，在注册阶段把所有路由 handler 包一层——同步抛错和 Promise 拒绝统一转成 `next(err)`，再由新加的 JSON 错误中间件返回 500。**请求失败，但进程活着**，而且改动集中在一处，覆盖全部现有与将来的路由；
+  3. **兜底**：`client.ts` 装 `unhandledRejection`（只记日志不退出，主进程管着所有账号，不该因为一个请求的意外而全部掉线）与 `uncaughtException`（记录完整堆栈后退出，未知状态继续跑风险更大）。
+- **修复是靠注入验证过的，不是靠「看起来对」**：把数组判断改回 `|| []` → 冒烟测试报 500 `friendsList is not iterable`（不再崩溃）；在路由里注入一个 `try` 之外的 async 抛出 → 返回 500 `smoke-inject-outside-try`；**同时去掉守卫 + 同样的抛出 → 进程真的崩了**。三个注入把「bug 是真的」「守卫确实在救」「没有守卫就会崩」全部坐实。
+- **顺手补的一处边界**：`/api/farm/fertilize` 没校验化肥类型，而 `/api/farm/fertilize-all` 校验了 —— 同一个枚举两套行为，非法值要跑到 worker 里才报错。统一在边界返回 400。
+- **前端补了 25 条真逻辑测试**。前端原来只有「读源码做静态断言」，等于只验证代码长什么样、不验证算得对不对。用一个不依赖 Node 版本的加载方式（仓库自带的 typescript 转译 → `data:` URL 导入，避开只有 Node 22.6+ 才有的 `--experimental-strip-types`），覆盖数字缩写、化肥时间换算、互动道具可用性判定、一键催熟步进状态机。
+- **因此抓到一处显示 bug**：`formatGoldAmount(99999999)` 显示成 **`10000.00万`** —— `(99999999/10000).toFixed(2)` 正好进位到 10000.00，看着像坏了。改成进位成 `1.00亿`。边界值现在单调：9999.99万 → 1.00亿 → 1.00亿。
+- **另外探查后确认没问题的**：`number-format` 对 `Infinity` / `NaN` / `null` / 非法文本一律显示 0；`fertilizer-time` 的负数与非法值都归零、未知单位按秒处理（不会除零）；`interaction-item-rules` 的整张决策表（未解锁 / 枯萎 / 成熟 / 已生效 / 种子期 / 天工 / 多格 / 闪电变异）行为一致，`land` 为 `null` 也不崩。
+- **闸门**：`core/tests/admin-route-safety.test.js`（4 条）锁住守卫的注册位置（必须早于第一个路由挂载）、错误中间件必须在 SPA 兜底之后、`unhandledRejection` 分支里不许有 `process.exit`、冒烟预加载必须重定向数据目录；`web/tests/utils-logic.test.mjs`（25 条）覆盖上面四个模块。三个静态回退注入各被抓 1 条。
+- **冒烟脚本保留为手工工具**：`cd core && pnpm test:smoke`（默认端口 34567，可用 `SMOKE_PORT` 覆盖），不进 `pnpm test`，避免 CI 里抢端口。
+- **验证**：`pnpm verify` 全绿（core 915 → **919**、web 248 → **273**、lint 0、类型检查 0），冒烟 0 失败。
+
+### 2026-11-14 · v3.25.6（#175） · 补齐剩余 5 个零测试模块的 67 条测试，并修掉两处同类边界问题
+
+- **上一轮剩下的 5 个全部补完**：`services/analytics.ts`、`services/activity-windows.ts`、`services/dog-skill-gifts.ts`、`services/invite.ts`、`services/collections.ts`。至此 `core/src` 里除纯类型定义外的所有模块都有直接测试。
+- **`analytics`（作物效率排行）**：这模块只有一行导出，内部全是隐式换算约定。锁三个容易出错的地方——① 双季作物的**三个倍率是分开写的**（生长 ×1.5、经验 ×2、化肥减免 ×2），漏掉任何一个排行都会悄悄偏掉而数值看起来仍然合理；② 化肥减免可能大于总生长时间，除法必须有兜底，否则指标会变成 `Infinity`；③ 白萝卜（29999）是活动作物，必须排掉否则会长期占榜首。游戏配置整体替换成小样本，每个断言都能手算核对。
+- **`activity-windows`（活动时间窗口）**：自动出售判断「活动是否结束」全靠这份带 TTL 的缓存。锁的是**降级语义**——拿不到时必须返回 `activityWindowsLoaded: false`（下游一律判「不满足条件」= 宁可不卖），而不是假装加载过；刷新失败但已有旧缓存时继续用旧的、且不能自称已加载。另外锁并发去重（同时刻多个调用只发一次请求）与两个网络事件（`activitiesChanged` / `disconnected`）的失效行为。
+- **`dog-skill-gifts`（宠物技能礼包）**：价值在「不该发请求的时候不发」——没有待领礼包时调领取接口等于每个巡检周期白打一次网关；并发调用没去重会重复领同一批礼包。测试覆盖提示值优先（跳过状态查询）、`claimed_count` 缺失时用物品数量兜底、失败时是否透传错误、以及并发三次只领一次。
+- **`invite`（邀请码）**：这条链路只在微信环境生效，平时几乎跑不到，一旦跑起来就是批量发好友申请，所以边界比功能重要。顺手修了一处真实可用性问题：**`parseShareLink` 原来只认 `?uid=...` 这种纯查询串**，用户把整段分享链接（`https://.../?uid=...`）粘进 share.txt 时 `URLSearchParams` 会把 `https://.../?uid` 整体当一个键名，结果 uid 解析成 null、邀请被静默跳过。现在改成统一取问号之后的部分，两种格式都认。
+- **`collections`（蓝晶藏品，19KB）**：只锁结构性不变量、不硬编码配置数值（配置会变）。重点：未拥有时 `canUpgrade` 必须为假；满星时不能再标记可升星；顶层 `activatedCount`/`totalCount` 必须等于各系列之和；`currentBuffs` 只能来自**已领取**的里程碑（达到分数但没领不能给属性）；`display` 在 `item_id` 为 0 时必须为 null；参数校验（非法藏品编号、星级不在 0–4、展示开关不是布尔）必须在发请求之前抛 `INVALID_ARGUMENT`。
+- **又修一处同类边界**：`dog-skill-gifts` 的 `Math.max(0, toNum(x))` 对 `Infinity` 无效（`Math.max(0, Infinity)` 还是 Infinity），而这个待领数量会下发给面板——JSON 里 `Infinity` 会变成 `null`，界面显示空白。抽了个 `safeCount()`（必须是有限正整数，否则归零），三处调用点统一。
+- **测试有效性仍然靠缺陷注入验证**：9 个注入全部被抓——去掉双季 1.5 倍生长时间、去掉白萝卜排除、TTL 判定失效、空回包不报错、去掉礼包并发去重、去掉邀请按 uid 去重、`canUpgrade` 恒为真。其中「去掉 `starLevel < 5`」这个注入**没被抓到**，原因是满星时配置里本来就没有 6 星材料、`copiesNeeded` 为空，两个条件是重合的——换成「`canUpgrade` 恒为真」就被抓了 2 条。这条记下来：**注入的变异点必须真正改变行为，否则「没抓到」不代表测试无效**。
+- **踩坑**：① 替换 `runtime-paths` 模块时只给 `getShareFilePath`，把 `ensureDataDir` 也一起抹掉了，`logger` 加载即崩 —— 改成展开真实导出再覆盖单个函数；② `operateCollections` 是同步抛错（在返回 Promise 之前），必须用 `assert.throws` 而不是 `assert.rejects`；③ `share_cfg_id` 走 `toLong` 是 Long 实例，比较前要 `Long.fromValue(...).toNumber()`。
+- **验证**：`pnpm verify` 全绿（core 848 → **915**、web 248、lint 0、类型检查 0）。
+
+### 2026-11-14 · v3.25.5（#173） · 为 8 个零测试的高风险模块补 123 条测试，并修复好友 GID 归一化放行 Infinity
+
+- **补测试的清单怎么定的**：先做了一次覆盖率普查——`core/src` 159 个源文件里 141 个被测试直接引用，剩下 18 个没有。按「影响面 × 是否在主流程 × 最近是否出过事」筛出 8 个：`capital-mode`（宠物自动派狗）、`auth-security`（登录与锁定）、`admin/middleware`（鉴权与错误形状）、`friend/gid-manager`（好友 GID）、`config/sell-conditions`（出售条件）、`services/account-resolver`（账号解析）、`utils/request-context`（请求班次）、`models/store/gid-cache`（GID 磁盘缓存）。
+- **补测试之前先验证测试本身有效**：新写的测试一次全绿是最可疑的信号，所以对每个被测模块做了缺陷注入——手动改坏源码，确认测试真的会红，再复原并用哈希核对。资本模式注入 3 个（去掉失败分支的 `clearOwnership`、把 120 秒兜底改成 60 秒、去掉「只撤自己的狗」判断）全部被抓；GID 模块去掉 `isSafeInteger` 检查被抓 3 条。
+- **顺手修掉一个真缺陷：好友 GID 归一化放行 Infinity**。`normalizeFriendGids` 写的是 `toNum(item)` + `value <= 0`——`toNum(Infinity)` 仍是 Infinity，`Infinity <= 0` 是 false，于是 Infinity 被当成合法 GID 收下，最后走到 `toLong()`；实测 `Long.fromNumber(Infinity)` 等于 **9223372036854775807**，请求会安安静静发到一个不存在的 GID 上。同类写法在 `dedupeFriendsByGid`、`markKnownFriendGidInvalid`、`removeKnownFriendGid` 各有一处，一并改成 `Number(toNum(x))` + `Number.isSafeInteger`（保留「数字字符串能认」的既有行为，只挡非有限值）。
+- **资本模式测试锁的三类不变量**：① 任何失败路径（派狗抛错、召回抛错、被别人占用、狗未拥有）都必须把 `phase` 收回 `idle`——漏一条就会**永久卡死**，此后所有务农操作都不再自动派狗，日志里什么都看不到；② 派出成功必须注册 120 秒兜底召回，撤回后两个定时器都要清掉；③ 5 秒节流窗口内不重复派狗，手动命令与配置变更要能收回自动派出的狗、且不能误撤别人的狗。
+- **登录安全测试锁的**：密码长度与字符类别边界、常见弱口令、PBKDF2 加盐哈希的往返与篡改检测、老版无盐 sha256 的兼容与「需要重新哈希」标记、失败 4 次不锁第 5 次锁 15 分钟、登录成功清零、锁定落盘后重启仍生效、单 IP 前 10 次放行第 11 次限流、窗口过期自动清零、以及**加载记录文件时只认 `admin` 与 `ip:` 前缀**（否则一条被写坏的记录就能伪造出十年锁定，把管理员永久锁在门外）。
+- **中间件测试锁的**：客户端 IP 的取值优先级与 `::ffff:` 前缀剥离（取错头会让所有请求共用一个限流桶，或反过来绕开限流）、token 闸门的放行与 401、账号列表在 provider 抛错时回落持久化存储、软错误 / 网关错误的分类、以及 `errorCode` 只在有限且非零时下发（`Infinity` 进 JSON 会变成 `null`）。
+- **其余几个**：出售条件的三种活动语义（结束后 / 结束前 / 区间外）× 窗口存在性的完整真值表，并锁住「活动窗口表未加载时一律判 false」这条保守策略；账号解析的 id / uin / qq 三种标识与「命中了但没有 id 时返回空串」；请求班次的继承、嵌套覆盖与离开作用域后不泄漏（异步跨 `await` 也要保留）；GID 缓存的路径穿越防护（账号 id 里的 `../` 与分隔符必须被替换掉，否则能写到数据目录之外）与读写失败吞错。
+- **验证**：`pnpm verify` 全绿（core 725 → **848**、web 248、lint 0、类型检查 0）。
+- **仍未覆盖的部分**（如实记录）：`services/collections.ts`（19KB，图鉴/变异数据整形，依赖游戏配置快照）、`services/analytics.ts`、`services/invite.ts`、`services/dog-skill-gifts.ts`、`services/activity-windows.ts` 仍未补测试；真实游戏协议变更、多账号并发时序、弱网重连恢复这三类结构上无法用单测覆盖。
+
+### 2026-11-14 · v3.25.3（#172） · 修复请求参数以 Infinity 绕过校验，并把外部输入面收成清单闸门
+
+- **这轮换了做法：不猜下一个 bug 在哪，而是把「进程外能写进来的东西」列成清单**。前几轮的问题是「读代码找坏味道」，读只能发现「看起来不对」的，发现不了「看起来对但语义错」的。这次先把所有入口点扫出来——`src/controllers/admin/` 下 17 个路由文件、78 个「文件 + 字段 + 来源」的接入点、127 处引用——再逐条问「它是什么类型、值域多少、在哪里被拦」。
+- **同一个洞的五个副本**：`Number(x) || 0` 不构成校验。`JSON.parse` 吃到 `1e400` 得到的是 `Infinity`，它是 truthy，`||` 根本不生效；`Math.max(0, Infinity)` 还是 `Infinity`。上一轮修的是宠物资本模式和两个宠物接口，这轮顺着同一条线又找出四处——**修实例而不修模式，就一定会漏掉副本**：
+  - `/api/pets/food/use` 的 `itemId`：上次只改了 `count` 和 `uid`，`itemId` 仍是 `Math.max(0, Math.trunc(Number(...) || 0))`；
+  - worker 侧 `removePlant([Number(args[0]) || 0])`：地块编号为 `Infinity` 时直接编进 int64；
+  - `planting.fertilizeOwnLand` 走 `toNum`：`!landId || landId <= 0` 对 `Infinity` 两个条件都不成立；
+  - worker 侧 `useItem` 的 `itemId` / `count` / `uid` 与 `buyFertilizer` 的 `count`。
+- **`toNum` 本身不承担校验职责**：它只做「Long → number」的转换（`LongModule.isLong(val) ? val.toNumber() : val || 0`），拿它当校验器用就是把 `Infinity` 原样传下去。现在明确规定：**外部可写的数值一律先过 `read*` 守卫，`toNum` 只用于服务端返回值**。`warehouse.sellItems` 里两处 `toNum(item.id)` / `toNum(item.count)` 一并改掉——原来的症状是「背包中未找到物品Infinity」这种看不懂的报错。
+- **统一守卫模块 `core/src/utils/input-guards.ts`**：`readId` / `readInt` / `readCount` / `readNonNegativeInt` / `readIdList` / `readEnumOr` 以及静默变体 `read*Or`。只认整数与纯整数文本，布尔 / 对象 / 数组 / 小数 / `NaN` / `±Infinity` / 超出安全整数 / 超过 19 位的数字文本一律拒绝；抛 `InputError` 并带字段名，路由侧映射成 400（其余错误仍走 `handleApiError`，保持既有 200/500 形状）。顺带把化肥阈值的区间与账户配置对齐（数量 ≤10000、阈值 ≤990 小时）——之前手工调接口能写进配置层夹不住的值。
+- **闸门 `core/tests/input-surface.test.js`（9 条）**，这才是这轮的产出：
+  - 清单与源码**双向**比对：新增路由字段不登记就红（逼着当场分类），清单里有源码已删的字段也红；
+  - 标为「路由层校验」的数值字段，每一处接入点都必须在 `read*` 或既有校验器（`parseLogLimit` / `positiveInteger` / `boundedInteger` / `safePositiveNumber` / `Number.isInteger` …）的窗口内；
+  - 标为「下游校验」的字段，钉住那个校验器还在（例如 `positiveDecimal(countInput`、`normalizeLandIds(landIdsInput`、`if (!ACTIONS[action]`）；
+  - 18 组敌意输入的实跑断言（`'1e400'`、`Number('1e400')`、`±Infinity`、`NaN`、负数、小数、布尔、数组、对象、`null`、`undefined`、空白、尾随字符、超安全整数、超长数组）；
+  - 控制器层禁止 `Number(req...) || …`、`Math.max(0, Math.trunc(Number(req...)))`、`toNum(req...)`；worker 层禁止 `Number(args[...]) || 0`。
+- **这套闸门能证明什么、不能证明什么**（写在测试文件头部，避免以后误读）：能证明清单与源码一致、没有任何路径把未经整数性检查的请求值当数值用、极端值会被拒绝；**不能**证明每个转发点都在本地校验——本仓库的约定是「路由转发、服务层校验」，大量数值在下游由 `positiveDecimal` 一族拦住，清单只能钉住校验器还在，逐字段证明得靠服务层自己的测试。
+- **顺手核对、结论是「没问题」的**：商城 `purchaseProps` / `purchaseMallProduct` / `purchaseMysteryOffer` 的 `positiveInteger` 已经足够严（正则拒掉 `1e400` 文本，`isSafeInteger` 拒掉溢出）；好友互动道具的 `safePositiveNumber` + `normalizeLandIds`；活动中心 `weather-activity` / `qixi` / `stellar` / `qingmei` / `charity` / `pet-diary` 全部走 `positiveDecimal` 或动作白名单；`/api/farm/ripen-all/step` 的 `cursor` 靠与预览会话等值比较，非法值只会得到「预览已失效」。
+- **发现但没动的**：`buyWeatherBottle` 实际映射到 `exchangeWeatherCollectorBottle`（不接受任何参数），路由收的 `count` 是死参数；`operatePetDiary` 的 `gid` 只用于查询，不写协议。这两处在清单里分别标成 `ignored` 与 `service`，不断言其数值语义。
+- **验证**：`pnpm verify` 全绿（core 715 → **725**、web 248、lint 0、类型检查 0）。
 
 ### 2026-11-13 · v3.25.2（#171） · 参数与边界复查：间隔上限缺失、定时器延时溢出、Infinity 放行与管理端口校验
 

@@ -22,6 +22,29 @@ const { createRuntimeEngine } = require(`${baseDir}/runtime/runtime-engine`);
 const { createModuleLogger } = require(`${baseDir}/services/logger`);
 const mainLogger = createModuleLogger('main');
 
+// 最后一道网：漏到进程级的 Promise 拒绝只记日志，不让进程退出。
+//
+// 主进程管着所有账号，因为一次 HTTP 请求里的意外抛错导致全部掉线是不划算的
+// （实测 `/api/friend-blacklist` 在 provider 返回非数组时会一击打死服务）。
+// 真正的修法在 controllers/admin/index.ts 的 guardAsyncRoutes：把路由抛错转成 500。
+// 这里只兜住「还没被兜住」的残余，避免一个未预料的拒绝直接终止服务。
+process.on('unhandledRejection', (reason: any) => {
+    mainLogger.error('unhandled rejection at process level', {
+        error: String((reason && reason.message) || reason),
+        stack: String((reason && reason.stack) || '').split('\n').slice(0, 4).join(' | '),
+    });
+});
+
+// 未捕获的同步异常会让进程处于未知状态，继续跑风险更大：记录完整堆栈后退出，
+// 交给容器重启，至少日志里能查到真正原因（默认行为只会打到 stdout）。
+process.on('uncaughtException', (error: any) => {
+    mainLogger.error('uncaught exception, exiting', {
+        error: String((error && error.message) || error),
+        stack: String((error && error.stack) || '').split('\n').slice(0, 8).join(' | '),
+    });
+    process.exit(1);
+});
+
 // 打包后 worker 由当前可执行文件以 --worker 模式启动
 const isWorkerProcess: boolean = process.env.FARM_WORKER === '1';
 if (isWorkerProcess) {

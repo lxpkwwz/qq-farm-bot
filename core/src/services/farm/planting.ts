@@ -8,6 +8,7 @@ const { performance } = require('node:perf_hooks');
 const { getPlantNameBySeedId, formatGrowTime, getPlantGrowTime, getAllSeeds, getPlantBySeedId } = require('../../config/gameConfig');
 const { getPreferredSeed, getAutomation, getPlantingStrategy, getBagSeedPriority, getBagSeedMultiLandReservationEnabled, getBagSeedLandTypes, getBagSeedFallbackStrategy, getPrioritize2x2Crops, getPlantDelaySeconds } = require('../../models/store');
 const { PlantPhase } = require('../../config/config');
+const { readIdOr } = require('../../utils/input-guards');
 const { getUserState, getWsErrorState, sendMsgAsync } = require('../../utils/network');
 const { toNum, getServerTimeSec, log, logWarn, sleep } = require('../../utils/utils');
 const { types } = require('../../utils/proto');
@@ -1547,8 +1548,10 @@ async function runFertilizerByConfig(plantedLands: any[] = [], options: { skipNo
 }
 
 async function fertilizeOwnLand(landIdInput: unknown, fertilizerTypeInput: unknown): Promise<any> {
-    const landId = toNum(landIdInput);
-    if (!landId || landId <= 0) {
+    // `toNum` 只做 Long→number 的转换：`Infinity || 0` 仍是 Infinity，`<= 0` 也拦不住，
+    // 于是越界编号会一路编进 int64 字段并静默失效。
+    const landId = readIdOr(landIdInput, 'landId', 0);
+    if (!landId) {
         throw new Error('地块编号无效');
     }
 

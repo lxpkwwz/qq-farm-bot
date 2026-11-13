@@ -34,6 +34,7 @@ const {
 } = require('../services/warehouse');
 const { checkAndClaimDogSkillGifts } = require('../services/dog-skill-gifts');
 const { isGatewayHealthyForBusiness, nextBusinessBackoffMs } = require('../utils/low-priority-gate');
+const { readCountOr, readId, readNonNegativeIntOr } = require('../utils/input-guards');
 const { connect, cleanup, getWs, getUserState, networkEvents, getGatewayLoad } = require('../utils/network');
 const { loadProto } = require('../utils/proto');
 const { formatDurationZh } = require('../utils/net-diagnosis-text');
@@ -1319,9 +1320,10 @@ async function handleApiCall(msg: any): Promise<void> {
                 break;
             case 'useItem': {
                 const { useItem: _useItem } = require('../services/warehouse');
-                const itemId = Number(args[0]) || 0;
-                const count = Math.max(1, Number(args[1]) || 1);
-                const uid = Number(args[2]) || 0;
+                // `Number(args[0]) || 0` 对 `1e400` 得到 Infinity：它是 truthy，`||` 不生效。
+                const itemId = readId(args[0], 'itemId');
+                const count = readCountOr(args[1], 1, 'count');
+                const uid = readNonNegativeIntOr(args[2], 0, 'uid');
                 result = await _useItem(itemId, count, [], uid);
                 break;
             }
@@ -1388,20 +1390,22 @@ async function handleApiCall(msg: any): Promise<void> {
                 result = await fertilizeOwnLand(args[0], args[1]);
                 break;
             case 'removePlant':
-                result = await require('../services/farm/api').removePlant([Number(args[0]) || 0]);
+                result = await require('../services/farm/api').removePlant([readId(args[0], 'landId')]);
                 break;
             case 'previewRipenAll':
                 result = await require('../services/farm/ripen-all').previewRipenAll();
                 break;
             case 'ripenAllStep':
-                result = await require('../services/farm/ripen-all').ripenAllStep(args[0], Number(args[1]) || 0);
+                // cursor 只用于与预览会话比对，非法值落到 0 会直接被判定「预览已失效」。
+                result = await require('../services/farm/ripen-all').ripenAllStep(args[0], readNonNegativeIntOr(args[1], 0, 'cursor'));
                 break;
             case 'fertilizeAllOwnLands':
                 result = await require('../services/farm').fertilizeAllOwnLands(args[0], args[1]);
                 break;
             case 'buyFertilizer': {
                 const fertilizerType = args[0] || 'organic';
-                const fertilizerCount = Number(args[1]) || 0;
+                // 0 = 不限数量，与账户配置的 10000 上限对齐。
+                const fertilizerCount = readCountOr(args[1], 0, 'count', 10000, 0);
                 result = await autoBuyFertilizer(true, fertilizerType, fertilizerCount, args[2] === true);
                 break;
             }

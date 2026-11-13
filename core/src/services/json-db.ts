@@ -55,6 +55,46 @@ function readJsonFileStrict(filePath: string, fallbackFactory?: () => any): any 
     }
 }
 
+/** 同步睡一小会儿（不烧 CPU）：只在 rename 重试之间用。 */
+function sleepSync(ms: number): void {
+    try {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    } catch {
+        const until = Date.now() + ms;
+        while (Date.now() < until) { /* 退化路径：极少数环境没有 SharedArrayBuffer */ }
+    }
+}
+
+const RENAME_RETRY_DELAYS_MS = [10, 20, 40, 80, 160];
+
+/**
+ * 原子替换文件，对 Windows 特有的瞬时占用做重试。
+ *
+ * 实测：在 Windows 上只要目标文件被别的进程（杀毒软件、Everything、同步盘、
+ * 编辑器）持有读句柄，`renameSync` 就稳定报 `EPERM`——本机验证持有句柄时
+ * 200/200 全部失败、放开后 200/200 全部成功。这些占用通常只有几十毫秒，
+ * 直接抛出会让配置写盘、每日状态记录偶发失败（表现为「刚改的设置重启后没了」）。
+ *
+ * 只对 EPERM / EACCES / EBUSY 重试；其它错误（磁盘满、路径不存在）立刻抛出。
+ */
+function renameWithRetry(from: string, to: string): void {
+    let lastError: any = null;
+    for (let attempt = 0; attempt <= RENAME_RETRY_DELAYS_MS.length; attempt += 1) {
+        try {
+            fs.renameSync(from, to);
+            return;
+        } catch (error: any) {
+            const code = String(error?.code || '');
+            lastError = error;
+            if (code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY') throw error;
+            const delay = RENAME_RETRY_DELAYS_MS[attempt];
+            if (delay === undefined) break;
+            sleepSync(delay);
+        }
+    }
+    throw lastError;
+}
+
 function writeJsonFileAtomic(filePath: string, data: any, space = 2): void {
     const json = JSON.stringify(data, null, space);
     writeTextFileAtomic(filePath, json);
@@ -79,7 +119,7 @@ function writeTextFileAtomic(filePath: string, text = ''): void {
         }
         fs.closeSync(fd);
         fd = null;
-        fs.renameSync(tmpPath, filePath);
+        renameWithRetry(tmpPath, filePath);
     } finally {
         if (fd !== null) {
             try { fs.closeSync(fd); } catch { /* ignore */ }
@@ -93,6 +133,7 @@ function writeTextFileAtomic(filePath: string, text = ''): void {
 }
 
 module.exports = {
+    renameWithRetry,
     readTextFile,
     readJsonFile,
     readJsonFileStrict,

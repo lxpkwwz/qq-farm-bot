@@ -7,6 +7,7 @@ export {};
  */
 const { getFruitName, getPlantByFruitId, getPlantBySeedId, getItemById, getItemImageById, getSeedImageBySeedId, getEffectiveSellInfo, getMutantEffectsByIds } = require('../config/gameConfig');
 const { isAutomationOn } = require('../models/store');
+const { readCountOr, readIdOr } = require('../utils/input-guards');
 const { sendMsgAsync, networkEvents, getUserState } = require('../utils/network');
 const { types } = require('../utils/proto');
 const { toLong, toNum, toTimeSec, log, logWarn, isTransientGatewaySkip, sleep, getSystemDateKey } = require('../utils/utils');
@@ -14,6 +15,8 @@ const { getSellConditionContext } = require('./activity-windows');
 const { updateStatusGold } = require('./status');
 
 const SELL_BATCH_SIZE: number = 15;
+/** 单次出售数量上限：只用来挡住荒谬值（Infinity / 1e15），不限制正常堆叠。 */
+const MAX_SELL_COUNT: number = 99999;
 const LOCKABLE_ITEM_TYPES: Set<number> = new Set([17, 6, 5]);
 const FERTILIZER_RELATED_IDS: Set<number> = new Set([
     100003, // 化肥礼包
@@ -74,8 +77,10 @@ async function sellItems(items: any[]): Promise<any> {
     const baseContext: SellConditionContext = await getSellConditionContext();
     const bagItems: any[] = getBagItems(await getBag());
     for (const item of requested) {
-        const id: number = toNum(item && item.id);
-        const count: number = toNum(item && item.count);
+        // `toNum` 不拦 Infinity（`Infinity || 0` 仍是 Infinity），会让后面的 `<= 0` 检查失效，
+        // 只会在「背包中未找到物品Infinity」这种文案上暴露出来。
+        const id: number = readIdOr(item && item.id, 'id', 0);
+        const count: number = readCountOr(item && item.count, 0, 'count', MAX_SELL_COUNT, 1);
         if (id <= 0 || count <= 0) throw new Error('出售物品参数无效');
         const info: any = getItemById(id);
         const bagItem: any | null = findBagItem(bagItems, item);

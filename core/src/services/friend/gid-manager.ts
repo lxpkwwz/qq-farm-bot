@@ -53,8 +53,8 @@ export function clearInvalidKnownFriendGidMarks(gids: any[]): void {
 }
 
 export function markKnownFriendGidInvalid(friendGid: any, nowMs: number = Date.now()): void {
-    const gid: number = toNum(friendGid);
-    if (!gid) return;
+    const gid: number = Number(toNum(friendGid));
+    if (!Number.isSafeInteger(gid) || gid <= 0) return;
     invalidKnownFriendGidCooldownUntil.set(gid, nowMs + INVALID_KNOWN_FRIEND_GID_COOLDOWN_MS);
 }
 
@@ -81,8 +81,11 @@ function getKnownFriendGidSyncRetryMs(): number {
 export function normalizeFriendGids(values: any[]): number[] {
     const normalized: number[] = [];
     for (const item of (Array.isArray(values) ? values : [])) {
-        const value: number = toNum(item);
-        if (value <= 0) continue;
+        // `toNum` 只是 Long→number 的转换：`Infinity || 0` 仍是 Infinity，`<= 0` 也拦不住；
+        // 数字字符串则会被原样返回（`'77' || 0 === '77'`）。统一 Number() 一次再判安全整数：
+        // 放过去的话会走到 toLong()，而 Long.fromNumber(Infinity) 是 int64 最大值，请求静默发错人。
+        const value: number = Number(toNum(item));
+        if (!Number.isSafeInteger(value) || value <= 0) continue;
         if (normalized.includes(value)) continue;
         normalized.push(value);
     }
@@ -99,8 +102,8 @@ export function dedupeFriendsByGid(friends: any[]): any[] {
     const result: any[] = [];
     const seen: Set<number> = new Set();
     for (const friend of (Array.isArray(friends) ? friends : [])) {
-        const gid: number = toNum(friend && friend.gid);
-        if (gid <= 0 || seen.has(gid)) continue;
+        const gid: number = Number(toNum(friend && friend.gid));
+        if (!Number.isSafeInteger(gid) || gid <= 0 || seen.has(gid)) continue;
         seen.add(gid);
         result.push(friend);
     }
@@ -214,8 +217,8 @@ export async function syncKnownFriendGidsFromRecentVisitors(force: boolean = fal
 }
 
 export function removeKnownFriendGid(friendGid: any, friendName?: string, reason: string = ''): boolean {
-    const gid: number = toNum(friendGid);
-    if (!gid) return false;
+    const gid: number = Number(toNum(friendGid));
+    if (!Number.isSafeInteger(gid) || gid <= 0) return false;
 
     const current: number[] = normalizeFriendGids(getKnownFriendGids());
     const next: number[] = current.filter((item: number) => item !== gid);

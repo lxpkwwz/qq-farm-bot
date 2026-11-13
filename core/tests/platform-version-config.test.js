@@ -1,3 +1,6 @@
+// 数据目录指向临时区：否则测试会通过真实 logger 往 core/data/logs 里追加日志。
+require('./helpers/isolate-data');
+
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -99,6 +102,11 @@ test('configuration snapshots and worker starts carry both versions with each ac
 });
 
 test('parallel QQ and WeChat workers select their own protocol, App ID and WASM', async () => {
+    // worker_threads 有独立的模块注册表，主线程改写 runtime-paths 的 require.cache
+    // 对它们无效 —— 这两个 worker 会把「加载 Protobuf」之类的 info 日志写进
+    // core/data 的真实日志。用 LOG_LEVEL 压掉即可（本用例不校验日志内容）。
+    const previousLogLevel = process.env.LOG_LEVEL;
+    process.env.LOG_LEVEL = 'error';
     const result = await Promise.all(['qq', 'wx'].map(platform => new Promise((resolve, reject) => {
         const worker = new Worker(`
             const { parentPort, workerData } = require('node:worker_threads');
@@ -132,6 +140,8 @@ test('parallel QQ and WeChat workers select their own protocol, App ID and WASM'
     assert.equal(result[1].host.userDataPath, undefined);
     assert.notEqual(result[0].build.file, result[1].build.file);
     assert.notEqual(result[0].build.sha256, result[1].build.sha256);
+    if (previousLogLevel === undefined) delete process.env.LOG_LEVEL;
+    else process.env.LOG_LEVEL = previousLogLevel;
 });
 
 test('saving or resetting connection settings never restarts live QQ or WeChat accounts', () => {

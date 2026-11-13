@@ -2,6 +2,7 @@ export {};
 const path = require('node:path');
 const fs = require('node:fs');
 const { getSystemDateKey } = require('../utils/utils');
+const { renameWithRetry } = require('./json-db');
 function getStatsFilePath(accountId: string): string {
     const dataDir: string = process.env.FARM_DATA_DIR || path.join(__dirname, '../../data');
     return path.join(dataDir, 'stats', `${accountId}.json`);
@@ -36,7 +37,9 @@ function savePersistedStats(accountId: string, data: any): void {
         }
         const tmpPath: string = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`;
         fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf8');
-        fs.renameSync(tmpPath, filePath);
+        // 与 json-db 共用同一套重试：Windows 上目标文件被杀毒/同步盘短暂占用时
+        // rename 会报 EPERM，直接抛会让当日统计偶发丢失。
+        renameWithRetry(tmpPath, filePath);
         persistFailureLogged = false;
     } catch (e: any) {
         if (!persistFailureLogged) {

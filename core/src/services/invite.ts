@@ -32,8 +32,11 @@ interface ParsedShareLink {
 function parseShareLink(link: string): ParsedShareLink {
     const result: ParsedShareLink = { uid: null, openid: null, shareSource: null, docId: null };
 
-    // 移除开头的 ? 如果有
-    const queryStr: string = link.startsWith('?') ? link.slice(1) : link;
+    // 只取问号之后的查询串：既支持 `?uid=...` 这种约定格式，
+    // 也能处理用户整段粘贴过来的分享链接（`https://.../?uid=...`）。
+    const raw: string = String(link || '');
+    const queryStart: number = raw.indexOf('?');
+    const queryStr: string = queryStart >= 0 ? raw.slice(queryStart + 1) : raw;
 
     // 解析参数
     const params = new URLSearchParams(queryStr);

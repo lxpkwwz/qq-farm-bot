@@ -1,12 +1,68 @@
 {
   "major": 3,
   "minor": 25,
-  "patch": 2,
-  "build": 171,
-  "version": "3.25.2",
-  "updatedAt": "2026-11-13T12:21:33.042Z",
+  "patch": 10,
+  "build": 179,
+  "version": "3.25.10",
+  "updatedAt": "2026-11-13T23:15:23.885Z",
   "lastCommit": "—",
   "history": [
+    {
+      "version": "3.25.10",
+      "build": 179,
+      "date": "2026-11-14",
+      "summary": "真实启动整个项目做全量路由扫描，修客户端错误被当成 500、测试写脏真实日志",
+      "commit": "—",
+      "type": "patch"
+    },
+    {
+      "version": "3.25.9",
+      "build": 178,
+      "date": "2026-11-14",
+      "summary": "测试不再往真实数据目录扔临时文件",
+      "commit": "—",
+      "type": "patch"
+    },
+    {
+      "version": "3.25.8",
+      "build": 177,
+      "date": "2026-11-14",
+      "summary": "修复 Windows 上原子写偶发 EPERM 导致配置与当日状态丢失的问题",
+      "commit": "—",
+      "type": "patch"
+    },
+    {
+      "version": "3.25.7",
+      "build": 176,
+      "date": "2026-11-14",
+      "summary": "修复单个 HTTP 请求可打死主进程的问题，并补上真实冒烟与前端逻辑测试",
+      "commit": "—",
+      "type": "patch"
+    },
+    {
+      "version": "3.25.6",
+      "build": 175,
+      "date": "2026-11-14",
+      "summary": "补齐剩余 5 个零测试模块的 67 条测试，并修掉两处同类边界问题",
+      "commit": "—",
+      "type": "patch"
+    },
+    {
+      "version": "3.25.5",
+      "build": 173,
+      "date": "2026-11-14",
+      "summary": "为 8 个零测试的高风险模块补 123 条测试，并修复好友 GID 归一化放行 Infinity",
+      "commit": "—",
+      "type": "patch"
+    },
+    {
+      "version": "3.25.3",
+      "build": 172,
+      "date": "2026-11-14",
+      "summary": "修复请求参数以 Infinity 绕过校验，并把外部输入面收成清单闸门",
+      "commit": "—",
+      "type": "patch"
+    },
     {
       "version": "3.25.2",
       "build": 171,

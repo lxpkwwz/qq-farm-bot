@@ -9,6 +9,15 @@ export {};
 
 const { getLevelExpProgress } = require('../../config/gameConfig');
 const store = require('../../models/store');
+const {
+    InputError,
+    readCount,
+    readCountOr,
+    readId,
+    readIdList,
+    readInt,
+    readNonNegativeIntOr,
+} = require('../../utils/input-guards');
 
 const {
     createAuthRequired,
@@ -16,6 +25,15 @@ const {
     handleApiError,
     resolveAccId,
 } = require('./middleware');
+
+/** 输入校验失败返回 400，其余仍走统一的 handleApiError（保持既有 200/500 形状）。 */
+function handleFarmError(res: Response, error: any): void {
+    if (error instanceof InputError) {
+        res.status(400).json({ ok: false, error: error.message });
+        return;
+    }
+    handleApiError(res, error);
+}
 
 function mountFarmRoutes(app: Application, ctx: AdminContext): void {
     const authRequired = createAuthRequired(ctx);
@@ -81,17 +99,13 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
         }
 
         try {
-            const type = String(req.body?.type || 'organic');
-            const rawCount = Number(req.body?.count ?? 0);
-            // `Number(x) || 0` 会原样放行 -5 / Infinity；负数直接进购买逻辑。
-            if (!Number.isFinite(rawCount) || rawCount < 0) {
-                return res.status(400).json({ ok: false, error: '无效的购买数量' });
-            }
-            const count = Math.trunc(rawCount);
+            // 0 表示「不限数量」，上限与账户配置里的 10000 对齐。
+            const type = req.body?.type === 'normal' ? 'normal' : 'organic';
+            const count = readInt(req.body?.count ?? 0, { field: 'count', min: 0, max: 10000 });
             const bought = await ctx.provider.buyFertilizer(id, type, count);
             res.json({ ok: true, bought });
         } catch (e: any) {
-            handleApiError(res, e);
+            handleFarmError(res, e);
         }
     });
 
@@ -105,15 +119,14 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
         try {
             const buyOrganic = req.body?.buyOrganic ?? false;
             const buyNormal = req.body?.buyNormal ?? false;
+            // 区间与 store 的归一化保持一致（账户配置里同样是数量 ≤10000、阈值 ≤990 小时），
+            // 否则手工调用接口能写进配置层夹不住的值。
             const amounts = {
-                organicCount: Number(req.body?.organicCount ?? 0),
-                organicThresholdHours: Number(req.body?.organicThresholdHours ?? 0),
-                normalCount: Number(req.body?.normalCount ?? 0),
-                normalThresholdHours: Number(req.body?.normalThresholdHours ?? 0),
+                organicCount: readInt(req.body?.organicCount ?? 0, { field: 'organicCount', min: 0, max: 10000 }),
+                organicThresholdHours: readInt(req.body?.organicThresholdHours ?? 0, { field: 'organicThresholdHours', min: 0, max: 990 }),
+                normalCount: readInt(req.body?.normalCount ?? 0, { field: 'normalCount', min: 0, max: 10000 }),
+                normalThresholdHours: readInt(req.body?.normalThresholdHours ?? 0, { field: 'normalThresholdHours', min: 0, max: 990 }),
             };
-            if (Object.values(amounts).some(n => !Number.isFinite(n) || n < 0)) {
-                return res.status(400).json({ ok: false, error: '无效的化肥参数' });
-            }
             const { organicCount, organicThresholdHours, normalCount, normalThresholdHours } = amounts;
 
             const result = await ctx.provider.checkAndBuyFertilizer(id, {
@@ -126,7 +139,7 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
             });
             res.json({ ok: true, ...result });
         } catch (e: any) {
-            handleApiError(res, e);
+            handleFarmError(res, e);
         }
     });
 
@@ -162,10 +175,12 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
         if (!id) return res.status(400).json({ ok: false, error: 'Missing x-account-id' });
 
         try {
-            const data = await ctx.provider.useSelfInteractionItemBatch(id, req.body?.itemId, req.body?.landIds);
+            const itemId = readId(req.body?.itemId, 'itemId');
+            const landIds = readIdList(req.body?.landIds, 'landIds', 200, 1);
+            const data = await ctx.provider.useSelfInteractionItemBatch(id, itemId, landIds);
             res.json({ ok: true, data });
         } catch (e: any) {
-            handleApiError(res, e);
+            handleFarmError(res, e);
         }
     });
 
@@ -325,10 +340,16 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
         try {
             const { itemId, count, uid } = req.body;
             if (!itemId) return res.status(400).json({ ok: false, error: '缺少 itemId' });
-            const data = await ctx.provider.useItem(id, Number(itemId), Math.max(1, Number(count) || 1), Number(uid) || 0);
+            // `Number(1e400)` 是 Infinity，`!itemId` 与 `Math.max(1, ...)` 都拦不住它。
+            const data = await ctx.provider.useItem(
+                id,
+                readId(itemId, 'itemId'),
+                readCountOr(count, 1, 'count'),
+                readNonNegativeIntOr(uid, 0, 'uid'),
+            );
             res.json({ ok: true, data });
         } catch (e: any) {
-            handleApiError(res, e);
+            handleFarmError(res, e);
         }
     });
 
@@ -342,10 +363,14 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
             if (!Array.isArray(items) || items.length === 0) {
                 return res.status(400).json({ ok: false, error: '缺少出售物品列表' });
             }
+            // 前端按 15 个一批提交，这里留足余量；无上限时一个请求就能塞进任意多项。
+            if (items.length > 500) {
+                return res.status(400).json({ ok: false, error: '一次最多出售 500 项' });
+            }
             const data = await ctx.provider.sellItems(id, items);
             res.json({ ok: true, data });
         } catch (e: any) {
-            handleApiError(res, e);
+            handleFarmError(res, e);
         }
     });
 
@@ -353,10 +378,12 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
         const id = getAccId(ctx, req);
         if (!id) return res.status(400).json({ ok: false, error: 'Missing x-account-id' });
         try {
-            const data = await ctx.provider.purchaseSeed(id, req.body?.goodsId, req.body?.count);
+            const goodsId = readId(req.body?.goodsId, 'goodsId');
+            const count = readCount(req.body?.count, 'count');
+            const data = await ctx.provider.purchaseSeed(id, goodsId, count);
             res.json({ ok: true, data });
         } catch (e: any) {
-            handleApiError(res, e);
+            handleFarmError(res, e);
         }
     });
 
@@ -473,16 +500,13 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
         try {
             // `Number(x)` 对 `1e400` 会给出 Infinity：`Math.max(0, Infinity)` 仍是 Infinity，
             // 一路编进 int64 字段不会报错，只会让这次调用静默失效。
-            const itemId = Math.max(0, Math.trunc(Number(req.body?.itemId) || 0));
-            const rawCount = Math.trunc(Number(req.body?.count) || 1);
-            const rawUid = Math.trunc(Number(req.body?.uid) || 0);
-            const count = Number.isFinite(rawCount) ? Math.max(1, rawCount) : 1;
-            const uid = Number.isFinite(rawUid) ? Math.max(0, rawUid) : 0;
-            if (!itemId) return res.status(400).json({ ok: false, error: '缺少 itemId' });
+            const itemId = readId(req.body?.itemId, 'itemId');
+            const count = readCountOr(req.body?.count, 1, 'count');
+            const uid = readNonNegativeIntOr(req.body?.uid, 0, 'uid');
             const data = await ctx.provider.useDogFood(id, itemId, count, uid);
             res.json({ ok: true, data });
         } catch (e: any) {
-            handleApiError(res, e);
+            handleFarmError(res, e);
         }
     });
 
@@ -491,12 +515,10 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
         const id = getAccId(ctx, req);
         if (!id) return res.status(400).json({ ok: false, error: 'Missing x-account-id' });
         try {
-            const rawDogId = Math.trunc(Number(req.body?.dogId) || 0);
-            const dogId = Number.isFinite(rawDogId) ? Math.max(0, rawDogId) : 0;
-            if (!dogId) return res.status(400).json({ ok: false, error: '缺少 dogId' });
+            const dogId = readId(req.body?.dogId, 'dogId');
             res.json({ ok: true, data: await ctx.provider.activateDog(id, dogId) });
         } catch (e: any) {
-            handleApiError(res, e);
+            handleFarmError(res, e);
         }
     });
 
@@ -505,12 +527,10 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
         const id = getAccId(ctx, req);
         if (!id) return res.status(400).json({ ok: false, error: 'Missing x-account-id' });
         try {
-            const rawDogId = Math.trunc(Number(req.body?.dogId) || 0);
-            const dogId = Number.isFinite(rawDogId) ? Math.max(0, rawDogId) : 0;
-            if (!dogId) return res.status(400).json({ ok: false, error: '缺少 dogId' });
+            const dogId = readId(req.body?.dogId, 'dogId');
             res.json({ ok: true, data: await ctx.provider.deployDog(id, dogId) });
         } catch (e: any) {
-            handleApiError(res, e);
+            handleFarmError(res, e);
         }
     });
 
@@ -621,11 +641,17 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
         const id = getAccId(ctx, req);
         if (!id) return res.status(400).json({ ok: false, error: 'Missing x-account-id' });
 
+        // 与 /api/farm/fertilize-all 保持一致：化肥类型是枚举，非法值在边界就拒掉，
+        // 不要等 worker 里再报错（那条路径会被统一错误处理映射成 500）。
+        if (req.body?.fertilizerType !== 'normal' && req.body?.fertilizerType !== 'organic') {
+            return res.status(400).json({ ok: false, error: '化肥类型必须是 normal 或 organic' });
+        }
         try {
-            const data = await ctx.provider.fertilizeOwnLand(id, req.body?.landId, req.body?.fertilizerType);
+            const landId = readId(req.body?.landId, 'landId');
+            const data = await ctx.provider.fertilizeOwnLand(id, landId, req.body.fertilizerType);
             res.json({ ok: true, data });
         } catch (e: any) {
-            handleApiError(res, e);
+            handleFarmError(res, e);
         }
     });
 
@@ -635,10 +661,11 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
         if (!id) return res.status(400).json({ ok: false, error: 'Missing x-account-id' });
 
         try {
-            const data = await ctx.provider.removePlant(id, req.body?.landId);
+            const landId = readId(req.body?.landId, 'landId');
+            const data = await ctx.provider.removePlant(id, landId);
             res.json({ ok: true, data });
         } catch (e: any) {
-            handleApiError(res, e);
+            handleFarmError(res, e);
         }
     });
 
@@ -674,12 +701,16 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
             return res.status(400).json({ ok: false, error: '化肥类型必须是 normal 或 organic' });
         }
         try {
-            // landIds 可选：只给勾选的土地施肥。
-            const landIds = Array.isArray(req.body?.landIds) ? req.body.landIds : undefined;
+            // landIds 可选：只给勾选的土地施肥。空数组按「没勾选任何地块」原样传下去，
+            // 但每一项都必须是正整数 —— `1e400` 会变成 Infinity 并静默编进 int64。
+            const rawLandIds = req.body?.landIds;
+            const landIds = rawLandIds === undefined || rawLandIds === null
+                ? undefined
+                : readIdList(rawLandIds, 'landIds', 200, 0);
             const data = await ctx.provider.fertilizeAllOwnLands(id, req.body.fertilizerType, landIds);
             res.json({ ok: true, data });
         } catch (e: any) {
-            handleApiError(res, e);
+            handleFarmError(res, e);
         }
     });
 

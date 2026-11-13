@@ -1,3 +1,6 @@
+// 数据目录指向临时区：否则测试会通过真实 logger 往 core/data/logs 里追加日志。
+require('./helpers/isolate-data');
+
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
