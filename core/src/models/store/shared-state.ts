@@ -47,6 +47,18 @@ const DEFAULT_LOGIN_SETTINGS: LoginSettings = {
     napCatSignature: '',
 };
 
+/**
+ * 收敛成「有限整数」。
+ * `Number(x) || fallback` 会把 Infinity 当成合法值放行（JSON 里的 `1e400` 解析出来就是
+ * Infinity），这类值进到等于比较 / 位运算里不会报错，只会静默失效。
+ */
+function toFiniteInt(input: unknown, fallback: unknown, minFallback: number = 0): number {
+    const value = Number(input);
+    if (Number.isFinite(value)) return Math.max(minFallback, Math.trunc(value));
+    const fb = Number(fallback);
+    return Number.isFinite(fb) ? Math.max(minFallback, Math.trunc(fb)) : minFallback;
+}
+
 const DEFAULT_CAPITAL_MODE: CapitalModeConfig = { enabled: false, dogId: 0, leadSeconds: 10 };
 
 function normalizeCapitalMode(value: unknown, fallback: CapitalModeConfig = DEFAULT_CAPITAL_MODE): CapitalModeConfig {
@@ -54,8 +66,10 @@ function normalizeCapitalMode(value: unknown, fallback: CapitalModeConfig = DEFA
     const base = (fallback && typeof fallback === 'object') ? fallback : DEFAULT_CAPITAL_MODE;
     return {
         enabled: input.enabled !== undefined ? input.enabled === true : base.enabled === true,
-        dogId: Math.max(0, Number(input.dogId ?? input.selectedDogId ?? base.dogId) || 0),
-        leadSeconds: Math.max(5, Math.min(300, Number(input.leadSeconds ?? input.secondsBeforeMature ?? base.leadSeconds) || 10)),
+        // `Number(x) || 0` 会原样放行 Infinity（JSON 里写 1e400 就是 Infinity），
+        // 之后 `dog.id === dogId` 永远不成立，资本模式静默变成「从不派狗」。
+        dogId: toFiniteInt(input.dogId ?? input.selectedDogId, base.dogId, 0),
+        leadSeconds: Math.max(5, Math.min(300, toFiniteInt(input.leadSeconds ?? input.secondsBeforeMature, base.leadSeconds, 10))),
     };
 }
 
@@ -384,7 +398,10 @@ function normalizeIntervals(intervals: Partial<IntervalConfig> | undefined): Int
     if (isStockDefaultIntervals(src)) {
         return { farm: 20, farmMin: 20, farmMax: 25, friendMin: 30, friendMax: 35, helpMin: 30, helpMax: 35, stealMin: 30, stealMax: 35 };
     }
-    const toSec = (v: unknown, d: number): number => Math.max(1, Number.parseInt(v as string, 10) || d);
+    // 上界必须夹到 INTERVAL_MAX_SEC：面板只写了 min="1" 没有 max，`1e15` 这类值会一路
+    // 变成 `*1000` 之后交给 setTimeout 的毫秒数，超过 32 位上限时 Node 会折成 1ms。
+    const toSec = (v: unknown, d: number): number =>
+        Math.max(1, Math.min(INTERVAL_MAX_SEC, Number.parseInt(v as string, 10) || d));
     const farm = toSec(src.farm, 20);
 
     let farmMin = toSec(src.farmMin, 20);

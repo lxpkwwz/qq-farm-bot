@@ -19,6 +19,7 @@ import { useIllustratedStore } from '@/stores/illustrated'
 import { useSettingStore } from '@/stores/setting'
 import { useStatusStore } from '@/stores/status'
 import { useToastStore } from '@/stores/toast'
+import { createRequestGuard } from '@/utils/request-guard'
 
 const props = withDefaults(defineProps<{ bookType?: 'crop' | 'mutant' }>(), { bookType: 'crop' })
 const accountStore = useAccountStore()
@@ -35,7 +36,7 @@ const bookName = computed(() => isMutant.value ? '超变图鉴' : '作物图鉴'
 const detailsOpen = ref(false)
 const claiming = ref(false)
 const rewardList = ref<HTMLElement | null>(null)
-let claimRevision = 0
+const claimGuard = createRequestGuard({ accountId: () => currentAccountId.value })
 const toast = useToastStore()
 const purchaseDialogOpen = ref(false)
 const selectedSeedItem = ref<any>(null)
@@ -133,7 +134,7 @@ const progressHint = computed(() => {
   return book.value.nextLevelProgress && remain > 0 ? `距下一级还差 ${remain} 进度` : '已达到最高等级'
 })
 
-let purchaseRevision = 0
+const purchaseGuard = createRequestGuard({ accountId: () => currentAccountId.value })
 const purchaseMax = computed(() => Math.min(9999, selectedSeedItem.value?.shopSeed?.remainingPurchaseCount ?? 9999))
 const purchaseValid = computed(() => isConnected.value && Number.isSafeInteger(purchaseCount.value) && purchaseCount.value >= 1 && purchaseCount.value <= purchaseMax.value)
 function canPurchaseSeed(item: any) {
@@ -155,14 +156,14 @@ async function purchaseSeed() {
     return
   const count = purchaseCount.value
   const accountId = String(currentAccountId.value)
-  const revision = ++purchaseRevision
+  const ticket = purchaseGuard.next(accountId)
   purchasingSeedId.value = item.seedId
   try {
     const response = await api.post('/api/seeds/purchase', { goodsId: seed.goodsId, count }, {
       headers: { 'x-account-id': accountId },
       skipErrorToast: true,
     } as any)
-    if (revision !== purchaseRevision || accountId !== String(currentAccountId.value))
+    if (purchaseGuard.isStale(ticket))
       return
     if (!response.data?.ok)
       throw new Error(getApiErrorMessage(response.data, '种子购买失败'))
@@ -172,11 +173,11 @@ async function purchaseSeed() {
     await refresh()
   }
   catch (cause: any) {
-    if (revision === purchaseRevision)
+    if (!purchaseGuard.isStale(ticket))
       toast.error(getApiErrorMessage(cause, '种子购买失败'))
   }
   finally {
-    if (revision === purchaseRevision)
+    if (!purchaseGuard.isStale(ticket))
       purchasingSeedId.value = null
   }
 }
@@ -209,7 +210,7 @@ async function runBuyAllMissing() {
   if (!targets.length)
     return
   const accountId = String(currentAccountId.value)
-  const revision = ++purchaseRevision
+  const ticket = purchaseGuard.next(accountId)
   buyAllRunning.value = true
   buyAllProgress.value = { done: 0, total: targets.length, success: 0, fail: 0 }
   try {
@@ -219,7 +220,7 @@ async function runBuyAllMissing() {
           headers: { 'x-account-id': accountId },
           skipErrorToast: true,
         } as any)
-        if (revision !== purchaseRevision || accountId !== String(currentAccountId.value))
+        if (purchaseGuard.isStale(ticket))
           return
         if (!response.data?.ok)
           throw new Error(getApiErrorMessage(response.data, '购买失败'))
@@ -230,7 +231,7 @@ async function runBuyAllMissing() {
       }
       buyAllProgress.value.done++
     }
-    if (revision !== purchaseRevision || accountId !== String(currentAccountId.value))
+    if (purchaseGuard.isStale(ticket))
       return
     const { success, fail } = buyAllProgress.value
     if (fail === 0)
@@ -241,7 +242,7 @@ async function runBuyAllMissing() {
     await refresh()
   }
   finally {
-    if (revision === purchaseRevision)
+    if (!purchaseGuard.isStale(ticket))
       buyAllRunning.value = false
   }
 }
@@ -282,11 +283,11 @@ async function claimRewards() {
   if (claiming.value || loading.value || !book.value?.claimable || !isConnected.value)
     return
   const accountId = currentAccountId.value
-  const revision = ++claimRevision
+  const ticket = claimGuard.next(accountId)
   claiming.value = true
   try {
     const response = await api.post('/api/illustrated/claim', { type: currentType.value === 'crop' ? 1 : 2 }, { headers: { 'x-account-id': accountId }, skipErrorToast: true } as any)
-    if (revision !== claimRevision)
+    if (claimGuard.isStale(ticket))
       return
     if (!response.data?.ok)
       throw new Error(getApiErrorMessage(response.data, '图鉴奖励领取失败'))
@@ -300,13 +301,13 @@ async function claimRewards() {
     else toast.success(message)
   }
   catch (cause) {
-    if (revision === claimRevision) {
+    if (!claimGuard.isStale(ticket)) {
       toast.error(getApiErrorMessage(cause, '图鉴奖励领取失败'))
       await refresh()
     }
   }
   finally {
-    if (revision === claimRevision)
+    if (!claimGuard.isStale(ticket))
       claiming.value = false
   }
 }
@@ -323,9 +324,9 @@ watch(currentType, () => {
   detailsOpen.value = false
 })
 watch([currentAccountId, isConnected], () => {
-  claimRevision++
+  claimGuard.invalidate()
   claiming.value = false
-  purchaseRevision++
+  purchaseGuard.invalidate()
   purchaseDialogOpen.value = false
   selectedSeedItem.value = null
   purchasingSeedId.value = null

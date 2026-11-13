@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import api, { getApiErrorMessage } from '@/api'
+import { createRequestGuard } from '@/utils/request-guard'
 
 export interface PetInfo {
   id: number
@@ -88,16 +89,16 @@ export const usePetStore = defineStore('pet', () => {
   const giftError = ref('')
   const error = ref('')
   const accountId = ref('')
-  let requestSequence = 0
-  let giftRequestSequence = 0
+  const petGuard = createRequestGuard()
+  const giftGuard = createRequestGuard()
 
   const dogs = computed(() => snapshot.value?.dogs || [])
   const foods = computed(() => snapshot.value?.foods || [])
   const activeDog = computed(() => dogs.value.find(dog => dog.active) || null)
 
   function clear() {
-    requestSequence++
-    giftRequestSequence++
+    petGuard.invalidate()
+    giftGuard.invalidate()
     snapshot.value = null
     loading.value = false
     usingFood.value = false
@@ -180,7 +181,7 @@ export const usePetStore = defineStore('pet', () => {
     if (!id)
       return false
 
-    const sequence = ++requestSequence
+    const ticket = petGuard.next()
     accountId.value = id
     loading.value = true
     giftError.value = ''
@@ -190,7 +191,7 @@ export const usePetStore = defineStore('pet', () => {
         headers: { 'x-account-id': id },
         skipErrorToast: true,
       } as any)
-      if (sequence !== requestSequence || accountId.value !== id)
+      if (petGuard.isStale(ticket) || accountId.value !== id)
         return false
       if (!res.data?.ok) {
         error.value = getApiErrorMessage(res.data, '无法读取宠物信息')
@@ -200,13 +201,13 @@ export const usePetStore = defineStore('pet', () => {
       return true
     }
     catch (cause: any) {
-      if (sequence !== requestSequence || accountId.value !== id)
+      if (petGuard.isStale(ticket) || accountId.value !== id)
         return false
       error.value = getApiErrorMessage(cause, '无法读取宠物信息')
       return false
     }
     finally {
-      if (sequence === requestSequence && accountId.value === id)
+      if (!petGuard.isStale(ticket) && accountId.value === id)
         loading.value = false
     }
   }
@@ -216,7 +217,7 @@ export const usePetStore = defineStore('pet', () => {
     if (!id || claimingGifts.value)
       return null
 
-    const sequence = ++giftRequestSequence
+    const ticket = giftGuard.next()
     claimingGifts.value = true
     giftError.value = ''
     try {
@@ -225,13 +226,13 @@ export const usePetStore = defineStore('pet', () => {
         skipErrorToast: true,
       } as any)
       if (!res.data?.ok || res.data?.data?.error) {
-        if (sequence === giftRequestSequence && accountId.value === id)
+        if (!giftGuard.isStale(ticket) && accountId.value === id)
           giftError.value = getApiErrorMessage(res.data?.data?.error ? res.data.data : res.data, '拾取礼包失败')
         return null
       }
 
       const data = res.data.data || {}
-      if (sequence !== giftRequestSequence || accountId.value !== id)
+      if (giftGuard.isStale(ticket) || accountId.value !== id)
         return null
       if (snapshot.value) {
         snapshot.value = {
@@ -242,12 +243,12 @@ export const usePetStore = defineStore('pet', () => {
       return data
     }
     catch (cause: any) {
-      if (sequence === giftRequestSequence && accountId.value === id)
+      if (!giftGuard.isStale(ticket) && accountId.value === id)
         giftError.value = getApiErrorMessage(cause, '拾取礼包失败')
       return null
     }
     finally {
-      if (sequence === giftRequestSequence)
+      if (!giftGuard.isStale(ticket))
         claimingGifts.value = false
     }
   }

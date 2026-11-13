@@ -200,7 +200,11 @@ function applyConfigSnapshot(snapshot: Record<string, any> | undefined, options:
     if (cfg.intervals && typeof cfg.intervals === 'object') {
         for (const [type, sec] of Object.entries(cfg.intervals)) {
             if ((next.intervals as any)[type] === undefined) continue;
-            (next.intervals as any)[type] = Math.max(1, Number.parseInt(sec as string, 10) || (next.intervals as any)[type] || 1);
+            const parsedSec = Number.parseInt(sec as string, 10);
+            (next.intervals as any)[type] = Math.max(
+                1,
+                Math.min(sharedState.INTERVAL_MAX_SEC, parsedSec || (next.intervals as any)[type] || 1),
+            );
         }
         next.intervals = normalizeIntervals(next.intervals);
     }

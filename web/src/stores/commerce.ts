@@ -1,6 +1,8 @@
+import type { RequestTicket } from '@/utils/request-guard'
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import api, { getApiErrorMessage } from '@/api'
+import { createRequestGuard } from '@/utils/request-guard'
 
 export interface CommerceItemDto {
   id: number
@@ -90,12 +92,13 @@ export const useCommerceStore = defineStore('commerce', () => {
   const purchasingGoodsId = ref<number | null>(null)
   const error = ref('')
   const notice = ref('')
-  let requestVersion = 0
+  const requestGuard = createRequestGuard({ accountId: () => localStorage.getItem('current_account_id') || '' })
   let mallAccountId = ''
   let mysteryAccountId = ''
 
-  function isCurrent(version: number, accountId: string) {
-    return version === requestVersion && String(localStorage.getItem('current_account_id') || '') === accountId
+  // 票号 + 当前账号一起校验：切号后旧账号的回包一律作废。
+  function isCurrent(ticket: RequestTicket) {
+    return !requestGuard.isStale(ticket)
   }
 
   function clearMessages() {
@@ -104,7 +107,7 @@ export const useCommerceStore = defineStore('commerce', () => {
   }
 
   function reset() {
-    requestVersion++
+    requestGuard.invalidate()
     mall.value = null
     mystery.value = null
     mysteryHistory.value = []
@@ -151,7 +154,7 @@ export const useCommerceStore = defineStore('commerce', () => {
       reset()
       return
     }
-    const version = ++requestVersion
+    const ticket = requestGuard.next(id)
     if (mallAccountId !== id || mall.value?.slotType !== slotType || !!mall.value?.shopId !== propsShop)
       mall.value = null
     mallAccountId = id
@@ -164,23 +167,23 @@ export const useCommerceStore = defineStore('commerce', () => {
         params: propsShop ? undefined : { slotType, subSlotType: 1 },
         skipErrorToast: true,
       } as any)
-      if (!isCurrent(version, id))
+      if (!isCurrent(ticket))
         return
       if (!response.data?.ok)
         throw new Error(getApiErrorMessage(response.data, '商城加载失败'))
       const catalog = response.data.data as MallCatalogDto
       await mergeDiamondBalance(id, catalog)
-      if (!isCurrent(version, id))
+      if (!isCurrent(ticket))
         return
       mall.value = catalog
     }
     catch (cause: any) {
-      if (!isCurrent(version, id))
+      if (!isCurrent(ticket))
         return
       error.value = getApiErrorMessage(cause, '商城加载失败')
     }
     finally {
-      if (isCurrent(version, id))
+      if (isCurrent(ticket))
         mallLoading.value = false
     }
   }
@@ -191,7 +194,7 @@ export const useCommerceStore = defineStore('commerce', () => {
       return false
     const slotType = mall.value?.slotType || 1
     const propsShop = mall.value?.shopId === 4
-    const version = requestVersion
+    const ticket = requestGuard.snapshot(id)
     purchasingGoodsId.value = goods.id
     clearMessages()
     try {
@@ -214,7 +217,7 @@ export const useCommerceStore = defineStore('commerce', () => {
         await mergeDiamondBalance(id, catalog)
       if (String(localStorage.getItem('current_account_id') || '') !== id)
         return false
-      if (version === requestVersion)
+      if (!requestGuard.isStale(ticket))
         mall.value = catalog
       const rewards = (response.data.data.purchase?.rewards || [])
         .map((item: CommerceItemDto) => `${item.name} x${item.count}`)
@@ -238,7 +241,7 @@ export const useCommerceStore = defineStore('commerce', () => {
       reset()
       return
     }
-    const version = ++requestVersion
+    const ticket = requestGuard.next(id)
     if (mysteryAccountId !== id)
       mystery.value = null
     mysteryAccountId = id
@@ -250,19 +253,19 @@ export const useCommerceStore = defineStore('commerce', () => {
         headers: { 'x-account-id': id },
         skipErrorToast: true,
       } as any)
-      if (!isCurrent(version, id))
+      if (!isCurrent(ticket))
         return
       if (!response.data?.ok)
         throw new Error(getApiErrorMessage(response.data, '神秘商人加载失败'))
       mystery.value = response.data.data
     }
     catch (cause: any) {
-      if (!isCurrent(version, id))
+      if (!isCurrent(ticket))
         return
       error.value = getApiErrorMessage(cause, '神秘商人加载失败')
     }
     finally {
-      if (isCurrent(version, id))
+      if (isCurrent(ticket))
         mysteryLoading.value = false
     }
   }

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { RequestTicket } from '@/utils/request-guard'
 import { NCard } from 'naive-ui/es/card'
 import { NModal } from 'naive-ui/es/modal'
 import { NRadio, NRadioGroup } from 'naive-ui/es/radio'
@@ -8,6 +9,7 @@ import api, { getApiErrorMessage } from '@/api'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import BaseInput from '@/components/ui/BaseInput.vue'
 import BaseTextarea from '@/components/ui/BaseTextarea.vue'
+import { createRequestGuard } from '@/utils/request-guard'
 import { runWxLoginStatusPoll } from '@/utils/wx-login-poll'
 
 const props = defineProps<{
@@ -27,7 +29,7 @@ const loginSettings = ref({
   napCatEndpoint: '',
   napCatSignature: '',
 })
-let loginSettingsRequestVersion = 0
+const loginSettingsGuard = createRequestGuard()
 const wxTaskId = ref('')
 const wxStatus = ref('')
 const wxError = ref('')
@@ -35,7 +37,7 @@ const wxLoading = ref(false)
 const wxQrUrl = ref('')
 let wxPollTimer: ReturnType<typeof setTimeout> | undefined
 let wxQrObjectUrl = ''
-let wxFlowVersion = 0
+const wxFlowGuard = createRequestGuard()
 let wxPollController: AbortController | undefined
 let wxPollInFlight: Promise<void> | undefined
 let wxPollKey = ''
@@ -48,7 +50,7 @@ const qqError = ref('')
 const qqLoading = ref(false)
 const qqQrUrl = ref('')
 let qqPollTimer: ReturnType<typeof setTimeout> | undefined
-let qqFlowVersion = 0
+const qqFlowGuard = createRequestGuard()
 let qqPollController: AbortController | undefined
 let qqPollInFlight: Promise<void> | undefined
 let qqPollKey = ''
@@ -186,11 +188,11 @@ async function submitPendingQrAccount(platform: 'wx' | 'qq') {
 }
 
 async function loadLoginSettings() {
-  const requestVersion = ++loginSettingsRequestVersion
+  const ticket = loginSettingsGuard.next()
   loginSettingsLoaded.value = false
   try {
     const response = await api.get('/api/settings/login-config', { skipErrorToast: true } as any)
-    if (requestVersion !== loginSettingsRequestVersion)
+    if (loginSettingsGuard.isStale(ticket))
       return
     const data = response.data?.data
     loginSettings.value = {
@@ -201,7 +203,7 @@ async function loadLoginSettings() {
     }
   }
   catch {
-    if (requestVersion !== loginSettingsRequestVersion)
+    if (loginSettingsGuard.isStale(ticket))
       return
     // Keep the existing login entries available when an older server has no endpoint yet.
     loginSettings.value = {
@@ -212,7 +214,7 @@ async function loadLoginSettings() {
     }
   }
   finally {
-    if (requestVersion === loginSettingsRequestVersion) {
+    if (!loginSettingsGuard.isStale(ticket)) {
       loginSettingsLoaded.value = true
       if (activeLoginTab.value === 'wx_qr' && !loginSettings.value.wechatQrLogin)
         activeLoginTab.value = 'code'
@@ -268,7 +270,7 @@ function stopWxPolling() {
 
 function resetWxLogin() {
   const oldTaskId = wxTaskId.value
-  wxFlowVersion += 1
+  wxFlowGuard.invalidate()
   stopWxPolling()
   if (oldTaskId) {
     void api.delete(`/api/wx-login/tasks/${oldTaskId}`, { skipErrorToast: true } as any).catch(() => undefined)
@@ -287,11 +289,11 @@ function resetWxLogin() {
   clearQrNameSubmitTimer()
 }
 
-function isWxFlowActive(taskId: string, flowVersion: number) {
-  return flowVersion === wxFlowVersion && taskId === wxTaskId.value
+function isWxFlowActive(taskId: string, flowVersion: RequestTicket) {
+  return !wxFlowGuard.isStale(flowVersion) && taskId === wxTaskId.value
 }
 
-async function getWxCodeAndAdd(taskId: string, flowVersion: number) {
+async function getWxCodeAndAdd(taskId: string, flowVersion: RequestTicket) {
   if (!isWxFlowActive(taskId, flowVersion))
     return
   // 编辑态重扫把账号 id 一并交给后端，让新凭据直接写回原账号；
@@ -309,7 +311,7 @@ async function getWxCodeAndAdd(taskId: string, flowVersion: number) {
   await addQrAccount('wx', code, nickname, credential)
 }
 
-async function confirmWxLogin(taskId: string, flowVersion: number) {
+async function confirmWxLogin(taskId: string, flowVersion: RequestTicket) {
   if (!isWxFlowActive(taskId, flowVersion))
     return
   wxStatus.value = '正在建立登录会话...'
@@ -319,7 +321,7 @@ async function confirmWxLogin(taskId: string, flowVersion: number) {
   await getWxCodeAndAdd(taskId, flowVersion)
 }
 
-async function pollWxLoginRequest(taskId: string, flowVersion: number) {
+async function pollWxLoginRequest(taskId: string, flowVersion: RequestTicket) {
   if (!isWxFlowActive(taskId, flowVersion))
     return
 
@@ -362,7 +364,7 @@ async function pollWxLoginRequest(taskId: string, flowVersion: number) {
   }
 }
 
-async function pollWxLogin(taskId: string, flowVersion: number) {
+async function pollWxLogin(taskId: string, flowVersion: RequestTicket) {
   if (!isWxFlowActive(taskId, flowVersion))
     return
 
@@ -396,7 +398,7 @@ async function startWxLogin() {
     return
   }
   resetWxLogin()
-  const flowVersion = wxFlowVersion
+  const flowVersion = wxFlowGuard.snapshot()
   wxLoading.value = true
   try {
     const response = await api.post('/api/wx-login/tasks', { app_id: 'wx5306c5978fdb76e4' })
@@ -404,7 +406,7 @@ async function startWxLogin() {
     const taskId = String(task?.task_id || '')
     if (!taskId)
       throw new Error('未创建登录任务')
-    if (flowVersion !== wxFlowVersion) {
+    if (wxFlowGuard.isStale(flowVersion)) {
       void api.delete(`/api/wx-login/tasks/${taskId}`, { skipErrorToast: true } as any).catch(() => undefined)
       return
     }
@@ -418,12 +420,12 @@ async function startWxLogin() {
     void pollWxLogin(taskId, flowVersion)
   }
   catch (error: any) {
-    if (flowVersion !== wxFlowVersion)
+    if (wxFlowGuard.isStale(flowVersion))
       return
     wxError.value = getApiErrorMessage(error, '二维码获取失败')
   }
   finally {
-    if (flowVersion === wxFlowVersion)
+    if (!wxFlowGuard.isStale(flowVersion))
       wxLoading.value = false
   }
 }
@@ -439,7 +441,7 @@ function stopQqPolling() {
 
 function resetQqLogin() {
   const taskId = qqTaskId.value
-  qqFlowVersion += 1
+  qqFlowGuard.invalidate()
   stopQqPolling()
   if (taskId)
     void cancelQqLoginTask(taskId)
@@ -452,8 +454,8 @@ function resetQqLogin() {
   clearQrNameSubmitTimer()
 }
 
-function isQqFlowActive(taskId: string, flowVersion: number) {
-  return flowVersion === qqFlowVersion && taskId === qqTaskId.value
+function isQqFlowActive(taskId: string, flowVersion: RequestTicket) {
+  return !qqFlowGuard.isStale(flowVersion) && taskId === qqTaskId.value
 }
 
 function ensureQqApiOk(response: any, fallback: string) {
@@ -463,7 +465,7 @@ function ensureQqApiOk(response: any, fallback: string) {
   return payload
 }
 
-async function getQqCodeAndAdd(taskId: string, flowVersion: number) {
+async function getQqCodeAndAdd(taskId: string, flowVersion: RequestTicket) {
   if (!isQqFlowActive(taskId, flowVersion))
     return
   qqLoading.value = true
@@ -502,7 +504,7 @@ async function cancelQqLoginTask(taskId: string) {
   catch {}
 }
 
-async function pollQqLoginRequest(taskId: string, flowVersion: number) {
+async function pollQqLoginRequest(taskId: string, flowVersion: RequestTicket) {
   if (!isQqFlowActive(taskId, flowVersion))
     return
 
@@ -558,7 +560,7 @@ async function pollQqLoginRequest(taskId: string, flowVersion: number) {
   }
 }
 
-async function pollQqLogin(taskId: string, flowVersion: number) {
+async function pollQqLogin(taskId: string, flowVersion: RequestTicket) {
   if (!isQqFlowActive(taskId, flowVersion))
     return
 
@@ -592,7 +594,7 @@ async function startQqLogin() {
     return
   }
   resetQqLogin()
-  const flowVersion = qqFlowVersion
+  const flowVersion = qqFlowGuard.snapshot()
   qqLoading.value = true
   try {
     const response = await api.post('/api/qq-login/tasks')
@@ -602,7 +604,7 @@ async function startQqLogin() {
     const qrImage = String(task?.qr_image || '')
     if (!taskId || !qrImage)
       throw new Error('未创建 QQ 登录任务')
-    if (flowVersion !== qqFlowVersion)
+    if (qqFlowGuard.isStale(flowVersion))
       return
     qqTaskId.value = taskId
     qqQrUrl.value = qrImage
@@ -610,11 +612,11 @@ async function startQqLogin() {
     void pollQqLogin(taskId, flowVersion)
   }
   catch (error: any) {
-    if (flowVersion === qqFlowVersion)
+    if (!qqFlowGuard.isStale(flowVersion))
       qqError.value = getApiErrorMessage(error, 'QQ 登录二维码获取失败')
   }
   finally {
-    if (flowVersion === qqFlowVersion)
+    if (!qqFlowGuard.isStale(flowVersion))
       qqLoading.value = false
   }
 }

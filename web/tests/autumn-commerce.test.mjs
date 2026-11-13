@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import test from 'node:test'
+import { requestGuardModule } from './helpers/ts-modules.mjs'
 
 const require = createRequire(import.meta.url)
 const { createPinia, disposePinia } = require('pinia')
@@ -19,7 +20,9 @@ function store(t, name, api, account = 'a') {
   const source = readFileSync(new URL(`../src/stores/${name}.ts`, import.meta.url), 'utf8')
   const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } })
   const module = { exports: {} }
-  new Function('require', 'module', 'exports', outputText)(id => id === '@/api' ? { __esModule: true, default: api, getApiErrorMessage: value => value?.message || 'error' } : require(id), module, module.exports)
+  new Function('require', 'module', 'exports', outputText)(id => id === '@/api'
+    ? { __esModule: true, default: api, getApiErrorMessage: value => value?.message || 'error' }
+    : id === '@/utils/request-guard' ? requestGuardModule : require(id), module, module.exports)
   return { value: module.exports[name === 'commerce' ? 'useCommerceStore' : 'useActivityCenterStore'](pinia), select: id => current = id }
 }
 test('new activity directory bindings survive normalization as independent pages', async (t) => {

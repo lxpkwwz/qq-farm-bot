@@ -85,7 +85,8 @@ interface SendMsgOptions {
 }
 
 interface PendingRequest {
-    callback: (err: Error | null, body?: Buffer, meta?: any) => void;
+    // 回调允许是 async：handleMessage 走 invokePendingCallback 统一接管拒绝。
+    callback: (err: Error | null, body?: Buffer, meta?: any) => void | Promise<void>;
     expectedErrorCodes: Set<number>;
     serviceName?: string;
     methodName?: string;
@@ -334,7 +335,7 @@ function rejectAllQueuedRequests(reason: string): number {
  * 都走这里，把「同步抛错」和「异步拒绝」一起收敛成一条告警。
  */
 function invokePendingCallback(
-    callback: (err: Error | null, body?: Buffer, meta?: any) => void,
+    callback: (err: Error | null, body?: Buffer, meta?: any) => void | Promise<void>,
     err: Error | null,
     body?: Buffer,
     meta?: any,
@@ -1028,7 +1029,7 @@ function buildLoginBody(clientVersion = getClientVersion()): Buffer {
     })).finish());
 }
 
-async function sendLogin(context: ConnectionContext, onLoginSuccess?: () => void): Promise<void> {
+async function sendLogin(context: ConnectionContext, onLoginSuccess?: () => void | Promise<void>): Promise<void> {
     const modern = usesPlayerSceneLogin(context.clientVersion);
     const body = buildLoginBody(context.clientVersion);
     await sendMsg(context, 'gamepb.userpb.UserService', modern ? 'PlayerLogin' : 'Login', body, {
@@ -1327,7 +1328,7 @@ function finalizeConnection(context: ConnectionContext, details: DisconnectDetai
 }
 
 // ============ WebSocket 连接 ============
-function connect(code: string | null, onLoginSuccess?: () => void): void {
+function connect(code: string | null, onLoginSuccess?: () => void | Promise<void>): void {
     const authCode = String(code || '').trim();
     if (!authCode) throw new Error('连接缺少一次性 Code');
     if (currentConnection && !currentConnection.finalized) throw new Error('WebSocket 连接已存在');

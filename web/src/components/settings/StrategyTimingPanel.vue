@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import BaseInput from '@/components/ui/BaseInput.vue'
 import BaseSwitch from '@/components/ui/BaseSwitch.vue'
+import { INTERVAL_INPUT_MIN, INTERVAL_MAX_SECONDS } from '@/utils/interval-limits'
 
 interface StrategyTimingSettings {
   intervals: {
@@ -26,11 +27,16 @@ function intervalModel(key: IntervalKey) {
     get: () => settings.value.intervals[key],
     set: (value: number | string) => {
       const parsed = Number.parseInt(String(value), 10)
+      // 输入框有 max，但清空 / 粘贴 / 程序赋值都能绕过它，所以这里再夹一次：
+      // 服务端同样夹到 86400，两边不一致时用户会看到「保存后数字被悄悄改小」。
+      const next = Number.isFinite(parsed)
+        ? Math.min(INTERVAL_MAX_SECONDS, Math.max(INTERVAL_INPUT_MIN, parsed))
+        : INTERVAL_INPUT_MIN
       settings.value = {
         ...settings.value,
         intervals: {
           ...settings.value.intervals,
-          [key]: Number.isFinite(parsed) ? parsed : 1,
+          [key]: next,
         },
       }
     },
@@ -50,13 +56,15 @@ const helpMax = intervalModel('helpMax')
         v-model.number="farmMin"
         label="农场巡查最小 (秒)"
         type="number"
-        min="1"
+        :min="INTERVAL_INPUT_MIN"
+        :max="INTERVAL_MAX_SECONDS"
       />
       <BaseInput
         v-model.number="farmMax"
         label="农场巡查最大 (秒)"
         type="number"
-        min="1"
+        :min="INTERVAL_INPUT_MIN"
+        :max="INTERVAL_MAX_SECONDS"
       />
     </div>
 
@@ -65,13 +73,15 @@ const helpMax = intervalModel('helpMax')
         v-model.number="helpMin"
         label="帮助巡查最小 (秒)"
         type="number"
-        min="1"
+        :min="INTERVAL_INPUT_MIN"
+        :max="INTERVAL_MAX_SECONDS"
       />
       <BaseInput
         v-model.number="helpMax"
         label="帮助巡查最大 (秒)"
         type="number"
-        min="1"
+        :min="INTERVAL_INPUT_MIN"
+        :max="INTERVAL_MAX_SECONDS"
       />
     </div>
 

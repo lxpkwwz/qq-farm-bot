@@ -9,7 +9,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const express = require('express');
 
-const { CONFIG } = require('../../config/config');
+const { CONFIG, DEFAULT_ADMIN_PORT } = require('../../config/config');
 const { getResourcePath } = require('../../config/runtime-paths');
 const { createModuleLogger } = require('../../services/logger');
 
@@ -98,7 +98,7 @@ function startAdminServer(dataProvider: any): void {
         }
     });
 
-    const port: number = CONFIG.adminPort || 3007;
+    const port: number = CONFIG.adminPort || DEFAULT_ADMIN_PORT;
     ctx.server = app.listen(port, '0.0.0.0', () => {
         adminLogger.info('admin panel started', { url: `http://localhost:${port}`, port });
     });

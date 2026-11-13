@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { FertilizerType, RipenAllPreview } from '@/stores/farm'
 import type { FriendInteractionItemDto, FriendInteractionResultDto } from '@/stores/friend'
+import type { RequestTicket } from '@/utils/request-guard'
 import { useIntervalFn, useResizeObserver } from '@vueuse/core'
 import { NButton } from 'naive-ui/es/button'
 import { NInputNumber } from 'naive-ui/es/input-number'
@@ -24,6 +25,7 @@ import { useSettingStore } from '@/stores/setting'
 import { useStatusStore } from '@/stores/status'
 import { useToastStore } from '@/stores/toast'
 import { interactionItemTargetReason } from '@/utils/interaction-item-rules'
+import { createRequestGuard } from '@/utils/request-guard'
 import { fertilizerHours, runRipenAll } from '@/utils/ripen-all'
 import { canRipenLand, ripenLand } from '@/utils/ripen-land'
 
@@ -94,7 +96,7 @@ function openLandDetailsFromBubble() {
 }
 
 /** 弹窗内催熟（老版 ripenLand 方案）：先普通肥一次，再连续施有机肥至成熟或无法继续。 */
-let detailActionSequence = 0
+const detailActionGuard = createRequestGuard()
 
 async function handleDetailFertilize() {
   const target = detailLand.value
@@ -103,8 +105,8 @@ async function handleDetailFertilize() {
     return
   if (!canRipenLand(lands.value.find(item => item.id === target.id)))
     return
-  const sequence = ++detailActionSequence
-  const cancelled = () => sequence !== detailActionSequence
+  const ticket = detailActionGuard.next()
+  const cancelled = () => detailActionGuard.isStale(ticket)
   detailActionPending.value = true
   try {
     const result = await ripenLand({
@@ -144,8 +146,8 @@ async function handleDetailRemove() {
   const target = detailLand.value
   if (!target || !currentAccountId.value || detailActionPending.value)
     return
-  const sequence = ++detailActionSequence
-  const cancelled = () => sequence !== detailActionSequence
+  const ticket = detailActionGuard.next()
+  const cancelled = () => detailActionGuard.isStale(ticket)
   detailActionPending.value = true
   try {
     await farmStore.removePlant(currentAccountId.value, Number(target.id))
@@ -218,10 +220,10 @@ const operating = ref(false)
 const ripenAllPreviewLoading = ref(false)
 const ripenAllRunning = ref(false)
 const ripenAllProgress = ref('')
-const pendingRipenAll = ref<{ preview: RipenAllPreview, accountId: string, sequence: number } | null>(null)
-let ripenUiSequence = 0
+const pendingRipenAll = ref<{ preview: RipenAllPreview, accountId: string, ticket: RequestTicket } | null>(null)
+const ripenGuard = createRequestGuard()
 watch(currentAccountId, () => {
-  ripenUiSequence++
+  ripenGuard.invalidate()
   pendingRipenAll.value = null
 })
 
@@ -250,22 +252,22 @@ const selecting = ref(!!route.query.interactionItem)
 const selectedIds = ref<string[]>([])
 const batchPending = ref(false)
 /** 施肥请求序号：用于丢弃过期响应（同一按钮连点时只认最后一次）。 */
-let fertilizerUiSequence = 0
+const fertilizerUiGuard = createRequestGuard()
 
 /** 催熟全部预览：读取可催熟地块数与普通/有机化肥预计消耗。 */
 async function requestRipenAll() {
   const accountId = currentAccountId.value
   if (!accountId || !currentAccountRunning.value || operating.value || fertilizePending.value || batchPending.value || ripenAllRunning.value || ripenAllPreviewLoading.value)
     return
-  const sequence = ++ripenUiSequence
+  const ticket = ripenGuard.next()
   ripenAllPreviewLoading.value = true
   try {
     const preview = await farmStore.previewRipenAll(accountId)
-    if (sequence === ripenUiSequence)
-      pendingRipenAll.value = { preview, accountId, sequence }
+    if (!ripenGuard.isStale(ticket))
+      pendingRipenAll.value = { preview, accountId, ticket }
   }
   catch (cause: any) {
-    if (sequence === ripenUiSequence)
+    if (!ripenGuard.isStale(ticket))
       toast.error(String(cause?.response?.data?.error || cause?.message || '催熟预览失败'))
   }
   finally {
@@ -279,8 +281,8 @@ async function executeRipenAll() {
   if (!pending || ripenAllRunning.value)
     return
   pendingRipenAll.value = null
-  const { preview, accountId, sequence } = pending
-  const cancelled = () => sequence !== ripenUiSequence
+  const { preview, accountId, ticket } = pending
+  const cancelled = () => ripenGuard.isStale(ticket)
   ripenAllRunning.value = true
   ripenAllProgress.value = `催熟中 0/${preview.targetCount}`
   try {
@@ -630,9 +632,9 @@ async function fertilizeSelected(fertilizerType: FertilizerType) {
   if (!currentAccountId.value || fertilizePending.value || batchPending.value || !targets.length)
     return
   const typeName = fertilizerType === 'organic' ? '有机化肥' : '普通化肥'
-  const sequence = ++fertilizerUiSequence
+  const ticket = fertilizerUiGuard.next()
   const result = await farmStore.fertilizeAll(currentAccountId.value, fertilizerType, targets.map(land => Number(land.id)))
-  if (sequence !== fertilizerUiSequence)
+  if (fertilizerUiGuard.isStale(ticket))
     return
   if (!result) {
     toast.error(fertilizeError.value || `${typeName}使用失败，请刷新土地确认最新状态`)

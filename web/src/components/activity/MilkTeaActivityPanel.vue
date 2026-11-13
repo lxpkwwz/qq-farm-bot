@@ -5,6 +5,7 @@ import api from '@/api'
 import { isWithinActivityWindowMs, MILK_TEA_ACTIVITY_WINDOW, MILK_TEA_AUTOMATION_OPTIONS } from '@/constants/activity-windows'
 import { useAccountStore } from '@/stores/account'
 import { teaActionReason, teaBalance, teaCandidateAvailable, teaCurrencyImage, teaDate, teaGoodsReason, teaHireReason, teaImage, teaInteger, teaNameValid, teaNumber, teaOpenSlots, teaPhase, teaPlainText, teaPurchaseMax, teaQuickEntries, teaRecentLogs, teaScaleRewards } from '@/utils/milk-tea'
+import { createRequestGuard } from '@/utils/request-guard'
 import MilkTeaAutomationStatus from './MilkTeaAutomationStatus.vue'
 import MilkTeaCraftDialog from './MilkTeaCraftDialog.vue'
 import MilkTeaDialog from './MilkTeaDialog.vue'
@@ -37,8 +38,8 @@ const contextError = ref('')
 const now = ref(Date.now())
 const lastUpdated = ref(0)
 let timer: ReturnType<typeof setInterval> | undefined
-let generation = 0
-let recordsRevision = 0
+const activityGuard = createRequestGuard()
+const recordsGuard = createRequestGuard()
 const nowSec = computed(() => state.value && lastUpdated.value
   ? Number(state.value.serverTime) + Math.max(0, now.value - lastUpdated.value) / 1000
   : now.value / 1000)
@@ -104,7 +105,7 @@ function totalCost(cost: TeaItem) {
 function close() {
   if (!busy.value) {
     modal.value = ''
-    recordsRevision++
+    recordsGuard.invalidate()
   }
 }
 function acceptActivity(activity: any) {
@@ -125,14 +126,14 @@ function acceptActivity(activity: any) {
 async function refreshContext() {
   if (document.hidden || contextLoading.value || !accounts.currentAccountId || !isWithinActivityWindowMs(MILK_TEA_ACTIVITY_WINDOW) || (state.value && !active.value))
     return
-  const token = generation
+  const token = activityGuard.snapshot()
   const accountId = accounts.currentAccountId
   contextLoading.value = true
   const result = await Promise.allSettled([
     api.get('/api/settings', { headers: { 'x-account-id': accountId } }),
     api.get('/api/logs', { headers: { 'x-account-id': accountId }, params: { module: 'activity', keyword: '奶茶热销中', limit: 6 } }),
   ])
-  if (token !== generation)
+  if (activityGuard.isStale(token))
     return
   const failures: string[] = []
   const [settingsResult, logsResult] = result
@@ -150,12 +151,12 @@ async function refreshContext() {
 async function refresh() {
   if (document.hidden || loading.value || busy.value || !accounts.currentAccountId || !isWithinActivityWindowMs(MILK_TEA_ACTIVITY_WINDOW))
     return
-  const token = generation
+  const token = activityGuard.snapshot()
   const accountId = accounts.currentAccountId
   loading.value = true
   try {
     const { data } = await api.get('/api/activity/milk-tea', { headers: { 'x-account-id': accountId }, timeout: 100000 })
-    if (token !== generation)
+    if (activityGuard.isStale(token))
       return
     if (!data.ok || !data.activity)
       throw new Error(data.error || '活动数据读取失败')
@@ -164,11 +165,11 @@ async function refresh() {
     void refreshContext()
   }
   catch (e: any) {
-    if (token === generation)
+    if (!activityGuard.isStale(token))
       error.value = e.response?.data?.error || e.message
   }
   finally {
-    if (token === generation)
+    if (!activityGuard.isStale(token))
       loading.value = false
   }
 }
@@ -181,13 +182,13 @@ async function act(action: string, params: Record<string, any> = {}) {
     error.value = reason
     return
   }
-  const token = generation
+  const token = activityGuard.snapshot()
   const accountId = accounts.currentAccountId
   busy.value = true
   error.value = ''
   try {
     const { data } = await api.post('/api/activity/milk-tea/operate', { accountId, action, params }, { headers: { 'x-account-id': accountId }, timeout: 190000 })
-    if (token !== generation)
+    if (activityGuard.isStale(token))
       return
     if (!data.ok)
       throw new Error(data.error || '操作失败')
@@ -197,7 +198,7 @@ async function act(action: string, params: Record<string, any> = {}) {
     records.value = null
   }
   catch (e: any) {
-    if (token === generation) {
+    if (!activityGuard.isStale(token)) {
       const message = e.response?.data?.error || e.message
       error.value = action === 'buy' && (e.code === 'ECONNABORTED' || /timeout/i.test(message || ''))
         ? '兑换结果暂未确认，请等待数据刷新后核对库存和限购，勿重复提交'
@@ -205,7 +206,7 @@ async function act(action: string, params: Record<string, any> = {}) {
     }
   }
   finally {
-    if (token === generation) {
+    if (!activityGuard.isStale(token)) {
       busy.value = false
       void refreshContext()
     }
@@ -214,25 +215,25 @@ async function act(action: string, params: Record<string, any> = {}) {
 async function loadRecords(kind: string, params: Record<string, unknown> = {}) {
   if (busy.value || loading.value || !accounts.currentAccountId || !isWithinActivityWindowMs(MILK_TEA_ACTIVITY_WINDOW) || !active.value)
     return
-  const token = generation
-  const revision = ++recordsRevision
+  const token = activityGuard.snapshot()
+  const ticket = recordsGuard.next()
   const accountId = accounts.currentAccountId
   busy.value = true
   error.value = ''
   try {
     const { data } = await api.post('/api/activity/milk-tea/records', { accountId, kind, params }, { headers: { 'x-account-id': accountId }, timeout: 100000 })
-    if (token !== generation || revision !== recordsRevision || modal.value !== kind)
+    if (activityGuard.isStale(token) || recordsGuard.isStale(ticket) || modal.value !== kind)
       return
     if (!data.ok)
       throw new Error(data.error || '记录读取失败')
     records.value = data
   }
   catch (e: any) {
-    if (token === generation && revision === recordsRevision)
+    if (!activityGuard.isStale(token) && !recordsGuard.isStale(ticket))
       error.value = e.response?.data?.error || e.message
   }
   finally {
-    if (token === generation && revision === recordsRevision)
+    if (!activityGuard.isStale(token) && !recordsGuard.isStale(ticket))
       busy.value = false
   }
 }
@@ -267,8 +268,8 @@ function visible() {
     void refresh()
 }
 watch(() => accounts.currentAccountId, () => {
-  generation++
-  recordsRevision++
+  activityGuard.invalidate()
+  recordsGuard.invalidate()
   state.value = null
   loading.value = false
   busy.value = false
@@ -289,8 +290,8 @@ onMounted(() => {
   timer = setInterval(() => {
     now.value = Date.now()
     if (!isWithinActivityWindowMs(MILK_TEA_ACTIVITY_WINDOW) || (state.value && ['ended', 'upcoming'].includes(teaPhase(state.value, nowSec.value)))) {
-      generation++
-      recordsRevision++
+      activityGuard.invalidate()
+      recordsGuard.invalidate()
       clearInterval(timer)
       modal.value = ''
       emit('back')
@@ -301,8 +302,8 @@ onMounted(() => {
   }, 15000)
 })
 onUnmounted(() => {
-  generation++
-  recordsRevision++
+  activityGuard.invalidate()
+  recordsGuard.invalidate()
   clearInterval(timer)
   document.removeEventListener('visibilitychange', visible)
 })

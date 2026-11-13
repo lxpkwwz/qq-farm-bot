@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 
 import test from 'node:test'
+import { requestGuardModule } from './helpers/ts-modules.mjs'
 
 const require = createRequire(import.meta.url)
 const { createPinia, disposePinia } = require('pinia')
@@ -35,6 +36,8 @@ test('邮箱时刻可读取和保存，午夜与旧配置默认值正确，账�
   new Function('require', 'module', 'exports', outputText)((id) => {
     if (id === '@/api')
       return { __esModule: true, default: api, getApiErrorMessage: value => value.error }
+    if (id === '@/utils/request-guard')
+      return requestGuardModule
     // 本仓库的设置 store 还依赖通知模板归一化；这里给恒等实现，测试不校验该字段。
     if (id === '@/utils/notification-template')
       return { normalizeNotificationTemplates: value => value ?? {} }
@@ -86,6 +89,8 @@ test('非法邮箱时刻被就地剔除，同一批的其它设置照常保存',
   new Function('require', 'module', 'exports', outputText)((id) => {
     if (id === '@/api')
       return { __esModule: true, default: api, getApiErrorMessage: value => value.error }
+    if (id === '@/utils/request-guard')
+      return requestGuardModule
     if (id === '@/utils/notification-template')
       return { normalizeNotificationTemplates: value => value ?? {} }
     if (id === '@/utils/hour-of-day')

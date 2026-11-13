@@ -2,6 +2,7 @@ import { useStorage } from '@vueuse/core'
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import api from '@/api'
+import { createRequestGuard } from '@/utils/request-guard'
 
 export interface Account {
   id: string
@@ -91,19 +92,19 @@ export const useAccountStore = defineStore('account', () => {
   const logs = ref<AccountLog[]>([])
   const codeHealth = ref<CodeHealthItem[]>([])
   const codeHealthLoaded = ref(false)
-  let accountsRequestSequence = 0
+  const accountsGuard = createRequestGuard()
 
   const currentAccount = computed(() =>
     accounts.value.find(a => String(a.id) === currentAccountId.value),
   )
 
   async function fetchAccounts() {
-    const sequence = ++accountsRequestSequence
+    const ticket = accountsGuard.next()
     loading.value = true
     try {
       // api interceptor adds x-admin-token
       const res = await api.get('/api/accounts')
-      if (sequence !== accountsRequestSequence)
+      if (accountsGuard.isStale(ticket))
         return
       if (res.data.ok && res.data.data && res.data.data.accounts) {
         const nextAccounts: Account[] = res.data.data.accounts
@@ -131,7 +132,7 @@ export const useAccountStore = defineStore('account', () => {
     }
     catch (e) {
       console.error('获取账号失败', e)
-      if (sequence !== accountsRequestSequence)
+      if (accountsGuard.isStale(ticket))
         return
       // 网络/超时类失败保留上一份账号快照，不要清空。
       // 原实现任何异常都清空 accounts + currentAccountId，会连带把用户选中的账号
@@ -139,7 +140,7 @@ export const useAccountStore = defineStore('account', () => {
       // 真正的「无账号/未登录」由成功响应里的空列表分支处理。
     }
     finally {
-      if (sequence === accountsRequestSequence)
+      if (!accountsGuard.isStale(ticket))
         loading.value = false
     }
   }

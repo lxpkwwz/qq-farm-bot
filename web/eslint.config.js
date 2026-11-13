@@ -3,7 +3,29 @@ import antfu from '@antfu/eslint-config'
 export default antfu(
   {
     vue: true,
-    typescript: true,
+    typescript: {
+      tsconfigPath: './tsconfig.app.json',
+      // 只保留「未处理 Promise」这一族规则；其余类型感知规则在现有代码库上噪声过大。
+      overridesTypeAware: {
+        'ts/await-thenable': 'error',
+        'ts/no-floating-promises': 'error',
+        'ts/no-misused-promises': ['error', { checksConditionals: false, checksSpreads: false }],
+        'ts/no-for-in-array': 'off',
+        'ts/no-unnecessary-type-assertion': 'off',
+        'ts/no-unsafe-argument': 'off',
+        'ts/no-unsafe-assignment': 'off',
+        'ts/no-unsafe-call': 'off',
+        'ts/no-unsafe-member-access': 'off',
+        'ts/no-unsafe-return': 'off',
+        'ts/promise-function-async': 'off',
+        'ts/restrict-plus-operands': 'off',
+        'ts/restrict-template-expressions': 'off',
+        'ts/return-await': 'off',
+        'ts/strict-boolean-expressions': 'off',
+        'ts/switch-exhaustiveness-check': 'off',
+        'ts/unbound-method': 'off',
+      },
+    },
     unocss: true,
     formatters: true,
     rules: {

@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import api, { getApiErrorMessage } from '@/api'
 import { parseHourOfDay } from '@/utils/hour-of-day'
 import { normalizeNotificationTemplates } from '@/utils/notification-template'
+import { createRequestGuard } from '@/utils/request-guard'
 
 export interface MilkTeaSeedPolicy {
   targetSeedIds: number[]
@@ -386,8 +387,9 @@ export const useSettingStore = defineStore('setting', () => {
   const loading = ref(false)
   const loadedAccountId = ref('')
   let pendingRequests = 0
-  let fetchRevision = 0
   let latestRequestedAccountId = ''
+  // 只用「最新一次请求 + 最新请求的账号」判过期：切号时旧账号的回包必须丢弃。
+  const fetchGuard = createRequestGuard({ accountId: () => latestRequestedAccountId })
 
   function beginRequest() {
     pendingRequests++
@@ -456,7 +458,7 @@ export const useSettingStore = defineStore('setting', () => {
   async function fetchSettings(accountId: string) {
     if (!accountId)
       return false
-    const requestRevision = ++fetchRevision
+    const ticket = fetchGuard.next(accountId)
     latestRequestedAccountId = accountId
     loadedAccountId.value = ''
     beginRequest()
@@ -464,7 +466,7 @@ export const useSettingStore = defineStore('setting', () => {
       const { data } = await api.get('/api/settings', {
         headers: { 'x-account-id': accountId },
       })
-      if (requestRevision !== fetchRevision)
+      if (fetchGuard.isStale(ticket))
         return false
       if (data && data.ok && data.data) {
         applyFetchedSettings(data.data)

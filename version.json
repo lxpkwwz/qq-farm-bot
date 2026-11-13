@@ -1,12 +1,36 @@
 {
   "major": 3,
-  "minor": 23,
-  "patch": 8,
-  "build": 168,
-  "version": "3.23.8",
-  "updatedAt": "2026-11-13T05:42:29.572Z",
+  "minor": 25,
+  "patch": 2,
+  "build": 171,
+  "version": "3.25.2",
+  "updatedAt": "2026-11-13T12:21:33.042Z",
   "lastCommit": "—",
   "history": [
+    {
+      "version": "3.25.2",
+      "build": 171,
+      "date": "2026-11-13",
+      "summary": "参数与边界复查：间隔上限缺失、定时器延时溢出、Infinity 放行与管理端口校验",
+      "commit": "—",
+      "type": "patch"
+    },
+    {
+      "version": "3.25.1",
+      "build": 170,
+      "date": "2026-11-13",
+      "summary": "重构切号竞态：27 处手写序号计数器全部收口到统一请求守卫",
+      "commit": "—",
+      "type": "patch"
+    },
+    {
+      "version": "3.25.0",
+      "build": 169,
+      "date": "2026-11-13",
+      "summary": "新增防复发门禁：把「未处理 Promise」这类反复出现的问题变成写的时候就报错",
+      "commit": "—",
+      "type": "minor"
+    },
     {
       "version": "3.23.8",
       "build": 168,

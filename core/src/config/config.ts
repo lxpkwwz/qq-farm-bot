@@ -200,6 +200,23 @@ const DEVICE_PRESETS: DevicePreset[] = [
 
 const DEFAULT_DEVICE_INFO: DeviceInfo = { ...DEVICE_PRESETS[0].deviceInfo, clientVersion: DEFAULT_CLIENT_VERSION };
 
+/** 管理面板默认端口，与 admin/controllers 的兜底值保持一致。 */
+const DEFAULT_ADMIN_PORT = 3007;
+
+/**
+ * 管理端口归一化。
+ * `Number(undefined)` 是 NaN（`NaN || 3007` 能兜住），但 `ADMIN_PORT=70000` 这类
+ * 「有限但越界」的值会让 `server.listen()` 抛 ERR_SOCKET_BAD_PORT，直接崩在启动阶段，
+ * 而且报错信息里看不出是环境变量写错了。这里统一夹到合法区间并回落默认端口。
+ */
+function resolveAdminPort(raw: unknown): number {
+    const value = Number(raw);
+    if (!Number.isFinite(value)) return DEFAULT_ADMIN_PORT;
+    const port = Math.trunc(value);
+    if (port < 1 || port > 65535) return DEFAULT_ADMIN_PORT;
+    return port;
+}
+
 const DEFAULT_SYSTEM_CONFIG: SystemConfig = {
     serverUrl: 'wss://gate-obt.nqf.qq.com/prod/ws',
     clientVersion: DEFAULT_CLIENT_VERSION,
@@ -255,7 +272,7 @@ const CONFIG: RuntimeConfig = {
     farmCheckIntervalMax: 25000,
     friendCheckIntervalMin: 30000,
     friendCheckIntervalMax: 35000,
-    adminPort: Number(process.env.ADMIN_PORT),
+    adminPort: resolveAdminPort(process.env.ADMIN_PORT),
     adminPassword: process.env.ADMIN_PASSWORD,
 };
 
@@ -383,6 +400,8 @@ module.exports = {
     DEFAULT_WX_CLIENT_VERSION,
     DEFAULT_WX_CLIENT_VERSION_UPDATED_AT,
     DEFAULT_TIME_ZONE,
+    DEFAULT_ADMIN_PORT,
+    resolveAdminPort,
     PlantPhase,
     PHASE_NAMES,
     updateRuntimeConfig,

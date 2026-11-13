@@ -4,6 +4,7 @@ import { createRequire } from 'node:module'
 // This repository runs its tests with Node's built-in runner.
 
 import test from 'node:test'
+import { requestGuardModule } from './helpers/ts-modules.mjs'
 
 const require = createRequire(import.meta.url)
 const { createPinia, disposePinia, setActivePinia } = require('pinia')
@@ -18,6 +19,7 @@ function harness(t, name, api) {
   const account = reactive({ currentAccountId: 'a' })
   const imports = {
     '@/api': { __esModule: true, default: api, getApiErrorMessage: value => value?.error || value?.message || '请求失败' },
+    '@/utils/request-guard': requestGuardModule,
     '@/stores/account': { useAccountStore: () => account },
     '@vueuse/core': { useStorage: (_key, initial) => ref(initial) },
   }

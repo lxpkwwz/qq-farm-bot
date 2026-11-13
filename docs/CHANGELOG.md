@@ -15,6 +15,9 @@
 
 | 版本 | 更新序号 | 日期 | 更新内容 | 提交 |
 | --- | --- | --- | --- | --- |
+| v3.25.2 | #171 | 2026-11-13 | 参数与边界复查：间隔上限缺失、定时器延时溢出、Infinity 放行与管理端口校验 | — |
+| v3.25.1 | #170 | 2026-11-13 | 重构切号竞态：27 处手写序号计数器全部收口到统一请求守卫 | — |
+| v3.25.0 | #169 | 2026-11-13 | 新增防复发门禁：把「未处理 Promise」这类反复出现的问题变成写的时候就报错 | — |
 | v3.23.8 | #168 | 2026-11-13 | 全仓完整性复查（第四轮，含前四轮回归）：修复进程致命拒绝、启动失败卡死与切号串数据 | — |
 | v3.23.7 | #167 | 2026-11-13 | 修复账号运行状态从不更新：补齐后端状态机，登录中 / 等待重登 / 停止中终于可见 | — |
 | v3.23.6 | #166 | 2026-11-13 | 全仓完整性复查：修复「全部账号」日志排序失效、停机不清活动主循环与巡检周期被反复重置 | — |
@@ -175,6 +178,42 @@ flowchart TB
 ```
 
 ## 详细记录
+
+### 2026-11-13 · v3.25.2（#171） · 参数与边界复查：间隔上限缺失、定时器延时溢出、Infinity 放行与管理端口校验
+
+- **这轮换了角度**：前四轮复查走的是「扫代码找坏味道」，每次捞回的都是同一批（未处理 Promise、竞态、空 catch）。这轮不扫代码，只查**数值本身的合理性**——单位、上下界、溢出、哨兵值。做法也换了：不再靠肉眼，而是把归一化函数拉出来用极端值实跑（NaN / ±Infinity / 1e15 / 数字字符串 / 空串 / 对象 / 数组 / 小数），看它吐回什么。
+- **最实的一条：巡查 / 好友间隔没有上限**。面板只写了 `min="1"`、没有 `max`，服务端 `normalizeIntervals` 也只有下限。实跑确认 `intervals.farm = 1e15` 会被原样收下，随后 `* 1000` 变成 `1e18` 毫秒交给定时器——而 Node 对超过 `2147483647` 的延时会打 `TimeoutOverflowWarning` 并把延时**改成 1ms**，原本「等一小时」的任务立刻变成 1ms 空转。更常见的实际后果没那么极端：把毫秒当秒填成 `20000`（想填 20 秒），农场就会安静地停摆 5 个半小时，界面没有任何提示。修法是把 `INTERVAL_MAX_SEC = 86400`（这个常量本来就在，只是这两条路径没用上）落到 `normalizeIntervals`、账号配置的逐项归一化、以及 worker 的 `normalizeIntervalRangeSec` 三处；面板两处表单补 `:max`，`intervalModel` 的 setter 也自己夹一次（输入框的 `max` 拦不住粘贴和程序赋值）。
+- **定时器侧再加一道**：`scheduler.toDelayMs` 原来只有下限（`Math.max(0, …)`），现在同时对 `MAX_TIMER_DELAY_MS = 2147483647` 封顶。这样即使将来某个 env（`FARM_STATUS_SYNC_INTERVAL_MS`）或新配置绕过了上游归一化，最坏也是「早醒」而不是「1ms 热循环」。
+- **Infinity 被当成合法数字放行**：`Number(x) || 0` 对 `Infinity` 不生效（它是 truthy），`Math.max(0, Infinity)` 也仍然是 `Infinity`。JSON 里写 `1e400` 解析出来就是 `Infinity`，所以这不是理论问题。命中两处：宠物资本模式的 `dogId`（变成 `Infinity` 后 `dog.id === dogId` 永远不成立，资本模式静默变成「从不派狗」，界面一切正常）；管理接口 `useDogFood` 的 `uid` / `count` 与 `activate` / `deploy` 的 `dogId`（`Infinity` 会编进 int64 字段，调用静默失效）。统一改成先 `Number.isFinite` 再取整。
+- **管理端口没校验**：`ADMIN_PORT=70000` 这种「有限但越界」的值会让 `server.listen()` 抛 `ERR_SOCKET_BAD_PORT`，崩在启动阶段且看不出是环境变量写错了（`NaN` 反而被 `|| 3007` 兜住了）。新增 `resolveAdminPort()`，非法值回落 `DEFAULT_ADMIN_PORT` 并统一常量。
+- **复查过、确认没问题、没动的**：`Date.now() - x < N` 这类「毫秒当秒用」的比较（全仓 2 处，都确实按毫秒）；`reduce` 无初值（3 处都有初值）；`Math.min(...arr)` 空数组（都已有长度守卫）；两份归一化器（`shared-state` 与 `account-config`）的夹取区间逐字段比对，只有 `leadSeconds` 单边存在（资本模式是全局配置，不是每账号，符合预期）；代码里 11 个道具 ID 魔数逐个到 `ItemInfo.json` 核对名称，全部对得上（金币 1001 / 点券 1002 / 钻石 1004 / 金豆 1005 / 天气采集瓶 5001 / 雷雨召唤瓶 5002 / 青蛙使坏瓶 5005 / 乌云使坏瓶 5006 / 雷电徽章 1027 / 黄金虫 301101 / 白萝卜种子 29999）。
+- **前几轮修复是否还成立**：`pnpm verify` 全绿即回归锁全部通过；另逐项确认必须保留的本地特性都还在（2×2 预留窗口 `reservationWindow` / `plantingRoundGate`、`allowXxx` 单一决策、预检账本 `recordPreflightResult`、`describeGatewayStall`、`startLogSizeGuard`、`invokePendingCallback`、`sendApiResponse`、`cancelPendingRelogin`）。
+- **新增闸门**（这轮的真正产出不是那几个修复，是下面两组会自己报警的测试）：`core/tests/config-param-bounds.test.js` 8 条——对两套归一化器做极端值实跑，断言所有间隔都是 `[1, INTERVAL_MAX_SEC]` 内的有限整数；断言 `INTERVAL_MAX_SEC * 1000 <= MAX_TIMER_DELAY_MS`（把「秒级配置上限」和「毫秒级定时器上限」绑在一起，任一边被调大而另一边没跟上就红）；用真实 scheduler 注册 `1e18` 延时任务并读快照确认已截断；端口解析表驱动；worker 的 `MAX_INTERVAL_SEC` 与 store 常量比对防漂移；禁止「Infinity 放行」写法回潮。`web/tests/interval-limits.test.mjs` 3 条——前端 `INTERVAL_MAX_SECONDS` 必须等于 core 的 `INTERVAL_MAX_SEC`、两处表单 8 个输入框都带上下限、setter 必须自己夹。
+- **验证**：`pnpm verify` 全绿（core 707 → **715**、web 245 → **248**、lint 0、类型检查 0），`vite build` 真实退出码通过。
+
+### 2026-11-13 · v3.25.1（#170） · 重构切号竞态：27 处手写序号计数器全部收口到统一请求守卫
+
+- **为什么动这一块**：切号竞态是反复出现的缺陷类别，根因不是某一个 store 写错，而是**每个 store 各写一份 `let seq = 0`**。手写版本有四个容易漏的点：① 取票必须在 await 之前；② 回包落地前必须校验；③ 切号 / 关闭弹窗必须作废在途；④ 校验时还要顺带确认账号没被切走。任漏一处，症状都是「A 账号的数据写进了已切到 B 的面板」，不报错、只能肉眼发现。全仓共 27 处手写副本，其中 4 处（`commerce`、`AccountModal` 的三个 flow 版本）连上一轮的清单都漏掉了。
+- **新增 `web/src/utils/request-guard.ts`**：`createRequestGuard()` 返回三个动作——`next(account?)` 取票并快照账号、`isStale(ticket)` 一次判完「票是否最新 + 账号是否还是同一个」、`invalidate()` 作废全部在途；另加 `snapshot()` 给「由外部事件作废、自己不递增」的场景（关闭弹窗、组件卸载、活动结束）。账号绑定是可选项：全局数据（账号列表、登录配置）不绑，账号相关的拉取绑上。
+- **迁移范围**：`stores/account`、`stores/commerce`、`stores/farm`（土地 / 施肥 / 互动道具三个）、`stores/friend`（好友列表 / 互动道具两个）、`stores/pet`（宠物信息 / 礼包两个）、`stores/pet-diary`、`stores/setting`、`stores/status`（状态 / 日志 / 钻石 / 每日礼包四个）、`composables/settings/usePlantingStrategy`（四个）、`components/FarmPanel`（详情操作 / 催熟全部 / 批量施肥三个）、`components/IllustratedPanel`（购买 / 领取两个）、`components/activity/MilkTeaActivityPanel`（活动代际 + 记录版本两个）、`components/AccountModal`（登录配置 + 微信 / QQ 两条登录流三个）。
+- **顺带消掉的重复条件**：`usePlantingStrategy` 里每处都手写 `id !== currentAccountId()`、`IllustratedPanel` 里每处都手写 `accountId !== String(currentAccountId.value)`——绑定账号后这些条件并入 `isStale()`，漏写的风险随之消失。
+- **两处刻意保持原语义**：`pet` 的「拾取礼包」`finally` 只判票号不判账号——若切号也把 `claimingGifts` 卡在 true，新账号的按钮会一直转圈（切号时由 `clear()` 显式复位）；`IllustratedPanel` 的领取**加了**账号校验（原来只判票号），切号后不再给旧账号弹 toast 或重置列表，属于收紧而非放宽。
+- **测试**：新增 `web/tests/request-guard.test.mjs` 11 条——8 条行为（最新票生效、`invalidate` 作废、`snapshot` 不递增、绑定账号后切号即过期、显式账号快照、空票按过期、账号归一化），3 条仓库闸门（`src` 里不允许再出现 `let xxxSeq/Sequence/Revision/generation/Version = 0`、11 个已知并发拉取点必须接守卫、取了票必须校验）。web **234 → 245** 全绿。
+- **测试基建**：新增 `web/tests/helpers/ts-modules.mjs`，把「转译 TS 后塞进 require 别名表」这件事收成一处（`loadTsModule` + 复用的 `requestGuardModule`），4 个用真实 store 跑行为的测试不再各写一份转译逻辑。
+- **没动**：`stores/activity-center.ts` 的 `requestVersion` 是 `ref` 且承担「操作独占版本」，语义与请求守卫不同（mutate 需要让并发加载失效），继续保留。
+- **验证**：`pnpm verify` 全绿（core 707 / web 245 / lint 0 / 类型检查 0），`vite build` 真实退出码通过（22s）。
+
+### 2026-11-13 · v3.25.0（#169） · 新增防复发门禁：把「未处理 Promise」这类反复出现的问题变成写的时候就报错
+
+- **起因**：连续四轮全仓复查，每次都能捞出一批同类缺陷（async 函数被当同步回调传出去、定时器不接管拒绝、切号竞态）。原因不是代码里还有没扫到的角落，而是**每一轮只修实例、没有闸门**——同一个写法在仓里有几十份副本，修掉五处，剩下的一直在，下一轮自然还是它。这轮不再扫代码，改成把规则固化。
+- **门禁一（core）**：接入类型感知 lint，只启用「未处理 Promise」这一族——`ts/no-floating-promises`、`ts/no-misused-promises`、`ts/await-thenable`。其余类型感知规则（`no-unsafe-*`、`strict-boolean-expressions`、`promise-function-async` 等）在 non-strict 代码库上噪声过大，逐条显式关掉并在配置里写明理由。`no-misused-promises` 关掉 `checksConditionals`：仓里大量 `if (pendingPromise)` 是「用 Promise 当哨兵」的合法写法，不该被判成缺陷。
+- **类型感知只覆盖 `src/**`**：`client.ts` 是根目录入口、不在 `tsconfig.json` 的 `include` 里，放开全目录会让 project service 直接报错退出；用 `filesTypeAware` 限定范围，入口文件仍走普通 lint。
+- **当场修掉的 5 处真问题**：`scheduler.ts` 的 `setTimeout(async …)` 与 `setInterval(runner)` 都不接管返回值，任务里任何一步意外抛错都会变成未处理拒绝（Node 20 视为致命）——改为显式 `runOnce().catch(…)` / `runner().catch(…)` 并记 error 日志；`worker.ts` 的 `onMasterMessage(async msg => …)` 同理，把处理器签名放宽成 `void | Promise<void>` 并由 `onMasterMessage` 统一接管拒绝，比在每个调用点各写一遍 `.catch` 更不容易漏；`network.ts` 的请求回调类型原本声明成 `=> void`，与实际传入的 `async` 回调不符，改成 `=> void | Promise<void>`（`invokePendingCallback` 本来就会接住 thenable，类型只是如实描述）；`sendLogin` 的 `onLoginSuccess` 同步放宽，`await onLoginSuccess()` 不再是「await 一个非 Promise」。
+- **门禁二（web）**：同一套规则接入前端，实测 6 处——`useFarmAutoRefreshInterval` 把 `tick` 直接交给 `useIntervalFn`，async tick 抛错后定时器还在跑、界面却再也不更新，新增 `safeTick` 统一捕获并 `console.error`；`usePlantingStrategy` 里 5 处「内部已 try/catch 并写入错误状态」的加载调用改为显式 `void`（说明这是按设计不等待，而不是漏写 await）。
+- **门禁三（一键验证）**：新增 `pnpm verify`＝`lint + test + typecheck:web`。以后「帮我检查一下」有确定命令，不再靠人工重新扫一遍、扫出什么算什么。
+- **门禁本身也要锁**：新增 `core/tests/lint-gate.test.js`（6 条）与 `web/tests/lint-gate.test.mjs`（4 条），断言规则确实开着、噪声规则确实关着、`tsconfigPath` 没被删、定时器注册处仍带 `.catch`、`onMasterMessage` 仍接管拒绝——防止后来者顺手把门禁关掉或改弱。
+- **没做、需要单独一轮的**：切号竞态这一类 lint 抓不到。前端现有 **23 处手写序号守卫**（`let xxxSeq = 0` 散布在 8 个 store / composable 里），没有共享抽象，新写一个 store 就只能靠人记得补守卫——这正是它反复出现的原因。正确做法是抽一个统一的请求守卫工具再逐处迁移，改动面横跨多个 store 与其静态断言，不适合塞进这轮。
+- **验证**：core **701 → 707**、web **230 → 234**，`pnpm verify` 全绿；`vite build` 用真实退出码复核通过（19s）。类型感知让 lint 从数秒涨到约 1 分钟，换来的是这类缺陷在提交前就被拦住。
 ### 2026-11-13 · v3.23.8（#168） · 全仓完整性复查（第四轮，含前四轮回归）：修复进程致命拒绝、启动失败卡死与切号串数据
 
 - **复查方式**：这轮明确把前四轮修过的也算进去，分两条线——① 逐条回归验证 v3.23.0 / .3 / .5 / .6 / .7 的接线仍然闭环，并把关键锚点写进 `core/tests/full-review-regression.test.js` 与 `web/tests/full-review-regression.test.mjs` 长期锁住；② 分三个区域（协议/网络/worker 主循环、其余控制器与持久化、前端组件与 stores）并行扫描未覆盖代码。共修复 19 处，按「会不会直接把进程带走」排序。

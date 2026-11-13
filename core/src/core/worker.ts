@@ -91,12 +91,26 @@ function sendApiResponse(id: any, result: any, error: any): void {
     }
 }
 
-function onMasterMessage(handler: (msg: any) => void): void {
+function onMasterMessage(handler: (msg: any) => void | Promise<void>): void {
+    // 指令处理器常写成 async；Node 20 把未处理的 Promise 拒绝当致命错误，
+    // 这里统一接管，避免一条指令的处理异常直接带走整个 worker。
+    const safeHandler = (msg: any): void => {
+        try {
+            const result: any = handler(msg);
+            if (result && typeof result.then === 'function') {
+                Promise.resolve(result).catch((error: any) => {
+                    logWarn('系统', `主进程指令处理异常: ${String((error && error.message) || error)}`, { module: 'system', event: '主进程指令', result: 'error' });
+                });
+            }
+        } catch (error: any) {
+            logWarn('系统', `主进程指令处理异常: ${String((error && error.message) || error)}`, { module: 'system', event: '主进程指令', result: 'error' });
+        }
+    };
     if (process.send) {
-        process.on('message', handler);
+        process.on('message', safeHandler);
     }
     if (parentPort) {
-        parentPort.on('message', handler);
+        parentPort.on('message', safeHandler);
     }
 }
 
@@ -221,10 +235,18 @@ function startDailyRoutineTimer(runImmediately: boolean = true): void {
     });
 }
 
+/**
+ * 巡查间隔的统一上界（秒），与 models/store/shared-state 的 INTERVAL_MAX_SEC 必须一致。
+ * 这里再夹一次是因为配置可能是旧文件 / 手写 JSON，绕过了 store 的归一化；
+ * 而 `秒 * 1000` 一旦超过 2^31-1 毫秒，setTimeout 会溢出成 1ms（见 scheduler 的 toDelayMs）。
+ */
+const MAX_INTERVAL_SEC = 86400;
+
 function normalizeIntervalRangeSec(minSec: any, maxSec: any, fallbackSec: any): { min: number; max: number } {
-    const fallback = Math.max(1, Number.parseInt(fallbackSec, 10) || 1);
-    let min = Math.max(1, Number.parseInt(minSec, 10) || fallback);
-    let max = Math.max(1, Number.parseInt(maxSec, 10) || fallback);
+    const clamp = (v: any, d: number): number => Math.max(1, Math.min(MAX_INTERVAL_SEC, v || d));
+    const fallback = clamp(Number.parseInt(fallbackSec, 10), 1);
+    let min = clamp(Number.parseInt(minSec, 10), fallback);
+    let max = clamp(Number.parseInt(maxSec, 10), fallback);
     if (min > max) [min, max] = [max, min];
     return { min, max };
 }
@@ -233,7 +255,7 @@ function applyIntervalsToRuntime(intervals: any): void {
     const data = (intervals && typeof intervals === 'object') ? intervals : {};
 
     // 农场巡查默认 20-25 秒（farmMin/farmMax 存在时以它们为准，farm 只是历史遗留单值）。
-    const farmLegacy = Math.max(1, Number.parseInt(data.farm, 10) || 20);
+    const farmLegacy = Math.max(1, Math.min(MAX_INTERVAL_SEC, Number.parseInt(data.farm, 10) || 20));
     const farmRange = normalizeIntervalRangeSec(data.farmMin, data.farmMax, farmLegacy);
     CONFIG.farmCheckIntervalMin = farmRange.min * 1000;
     CONFIG.farmCheckIntervalMax = farmRange.max * 1000;

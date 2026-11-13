@@ -471,9 +471,13 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
         if (!id) return res.status(400).json({ ok: false, error: 'Missing x-account-id' });
 
         try {
-            const itemId = Number(req.body?.itemId) || 0;
-            const count = Math.max(1, Math.trunc(Number(req.body?.count) || 1));
-            const uid = Math.max(0, Number(req.body?.uid) || 0);
+            // `Number(x)` 对 `1e400` 会给出 Infinity：`Math.max(0, Infinity)` 仍是 Infinity，
+            // 一路编进 int64 字段不会报错，只会让这次调用静默失效。
+            const itemId = Math.max(0, Math.trunc(Number(req.body?.itemId) || 0));
+            const rawCount = Math.trunc(Number(req.body?.count) || 1);
+            const rawUid = Math.trunc(Number(req.body?.uid) || 0);
+            const count = Number.isFinite(rawCount) ? Math.max(1, rawCount) : 1;
+            const uid = Number.isFinite(rawUid) ? Math.max(0, rawUid) : 0;
             if (!itemId) return res.status(400).json({ ok: false, error: '缺少 itemId' });
             const data = await ctx.provider.useDogFood(id, itemId, count, uid);
             res.json({ ok: true, data });
@@ -487,7 +491,8 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
         const id = getAccId(ctx, req);
         if (!id) return res.status(400).json({ ok: false, error: 'Missing x-account-id' });
         try {
-            const dogId = Math.max(0, Number(req.body?.dogId) || 0);
+            const rawDogId = Math.trunc(Number(req.body?.dogId) || 0);
+            const dogId = Number.isFinite(rawDogId) ? Math.max(0, rawDogId) : 0;
             if (!dogId) return res.status(400).json({ ok: false, error: '缺少 dogId' });
             res.json({ ok: true, data: await ctx.provider.activateDog(id, dogId) });
         } catch (e: any) {
@@ -500,7 +505,8 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
         const id = getAccId(ctx, req);
         if (!id) return res.status(400).json({ ok: false, error: 'Missing x-account-id' });
         try {
-            const dogId = Math.max(0, Number(req.body?.dogId) || 0);
+            const rawDogId = Math.trunc(Number(req.body?.dogId) || 0);
+            const dogId = Number.isFinite(rawDogId) ? Math.max(0, rawDogId) : 0;
             if (!dogId) return res.status(400).json({ ok: false, error: '缺少 dogId' });
             res.json({ ok: true, data: await ctx.provider.deployDog(id, dogId) });
         } catch (e: any) {

@@ -8,6 +8,7 @@ import BaseInput from '@/components/ui/BaseInput.vue'
 import BaseSelect from '@/components/ui/BaseSelect.vue'
 import BaseSwitch from '@/components/ui/BaseSwitch.vue'
 import { usePlantingStrategy } from '@/composables/settings/usePlantingStrategy'
+import { INTERVAL_INPUT_MIN, INTERVAL_MAX_SECONDS } from '@/utils/interval-limits'
 
 const props = defineProps<{
   currentAccountId: string | number | null | undefined
@@ -175,25 +176,29 @@ const isBagPriority = computed(() => settings.value.plantingStrategy === 'bag_pr
         v-model.number="settings.intervals.farmMin"
         label="农场巡查最小 (秒)"
         type="number"
-        min="1"
+        :min="INTERVAL_INPUT_MIN"
+        :max="INTERVAL_MAX_SECONDS"
       />
       <BaseInput
         v-model.number="settings.intervals.farmMax"
         label="农场巡查最大 (秒)"
         type="number"
-        min="1"
+        :min="INTERVAL_INPUT_MIN"
+        :max="INTERVAL_MAX_SECONDS"
       />
       <BaseInput
         v-model.number="settings.intervals.friendMin"
         label="好友任务最小 (秒)"
         type="number"
-        min="1"
+        :min="INTERVAL_INPUT_MIN"
+        :max="INTERVAL_MAX_SECONDS"
       />
       <BaseInput
         v-model.number="settings.intervals.friendMax"
         label="好友任务最大 (秒)"
         type="number"
-        min="1"
+        :min="INTERVAL_INPUT_MIN"
+        :max="INTERVAL_MAX_SECONDS"
       />
     </div>
 

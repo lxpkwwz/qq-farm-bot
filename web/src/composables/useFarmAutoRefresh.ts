@@ -64,7 +64,19 @@ export function useFarmAutoRefresh() {
 /** 在调用方注册一个跟随共享开关的周期任务：默认关闭，开启后按设定秒数执行 tick。 */
 export function useFarmAutoRefreshInterval(tick: () => void | Promise<void>) {
   const { autoRefreshEnabled, autoRefreshIntervalMs } = useFarmAutoRefresh()
-  const { pause, resume } = useIntervalFn(tick, autoRefreshIntervalMs, { immediate: false })
+  // useIntervalFn 不接管返回值：async tick 抛错会变成未处理的 Promise 拒绝，
+  // 定时器还在跑、界面却再也不更新。这里统一兜住并留一条可查的日志。
+  const safeTick = () => {
+    try {
+      const result = tick()
+      if (result && typeof (result as Promise<void>).then === 'function')
+        Promise.resolve(result).catch(error => console.error('[自动刷新] 周期任务执行失败', error))
+    }
+    catch (error) {
+      console.error('[自动刷新] 周期任务执行失败', error)
+    }
+  }
+  const { pause, resume } = useIntervalFn(safeTick, autoRefreshIntervalMs, { immediate: false })
   watch(autoRefreshEnabled, (on) => {
     if (on)
       resume()

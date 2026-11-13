@@ -4,6 +4,7 @@ import { createRequire } from 'node:module'
 // This repository runs its tests with Node's built-in runner.
 
 import test from 'node:test'
+import { requestGuardModule } from './helpers/ts-modules.mjs'
 
 const require = createRequire(import.meta.url)
 const { createPinia, disposePinia, setActivePinia } = require('pinia')
@@ -16,6 +17,7 @@ function harness(t, api) {
   t.after(() => disposePinia(pinia))
   const imports = {
     '@/api': { __esModule: true, default: api, getApiErrorMessage: value => value?.error || value?.message || '请求失败' },
+    '@/utils/request-guard': requestGuardModule,
   }
   const source = readFileSync(new URL('../src/stores/pet-diary.ts', import.meta.url), 'utf8')
   const { outputText } = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } })
