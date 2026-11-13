@@ -70,6 +70,7 @@ function mountWxLoginRoutes(app: Application, ctx: AdminContext): void {
             const accountId = String(body.account_id || body.accountId || '').trim();
             // 只要拿到长效凭证就写回：部分环境不回传 refreshtoken，
             // 但 loginBuffer 仍可直接换 Code，不能因为缺 refreshtoken 就丢掉整套凭据。
+            let credentialSaveError = '';
             if (accountId && (credential.refreshtoken || credential.loginBuffer)) {
                 // 编辑重扫场景：直接把新凭据写回账号，避免只更新 Code 导致下次续期用旧 token。
                 try {
@@ -86,12 +87,19 @@ function mountWxLoginRoutes(app: Application, ctx: AdminContext): void {
                         wxCredentialLastAttemptAt: Date.now(),
                         wxCredentialRefreshError: '',
                     });
-                } catch {
-                    // 账号不存在或暂不可写时忽略，Code 仍会正常返回给前端。
+                } catch (error: any) {
+                    // 账号不存在时 addOrUpdateAccount 是静默跳过（不抛错），能走到这里
+                    // 说明是写盘失败：长效凭据没落盘，重启后必然丢，不能回报成功让前端
+                    // 以为免扫码续期已经生效。同时把原因落日志，别只靠前端 toast。
+                    credentialSaveError = String((error && error.message) || error);
+                    console.error(`[微信登录] 账号 ${accountId} 长效凭据保存失败：${credentialSaveError}`);
                 }
             }
             const data = { openid: task.session.openid, app_id: TARGET_APP_ID, code: task.code, nickname: task.session.nickname || '', credential, err_msg: 'login:ok' };
             destroy(task);
+            if (credentialSaveError) {
+                return res.status(500).json({ ok: false, error: `凭据保存失败，请重试：${credentialSaveError}` });
+            }
             res.json({ ok: true, data });
         } catch (error: any) {
             task.status = 'failed';

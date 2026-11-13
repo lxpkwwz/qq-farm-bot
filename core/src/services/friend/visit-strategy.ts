@@ -858,112 +858,120 @@ export async function visitFriend(
         return { acted: false, entered: true };
     }
 
-    const plantBlacklist: number[] = getPlantBlacklist(accountId);
-    const status: AnalyzeResult = analyzeFriendLands(lands, myGid, name, { plantBlacklist });
+    // 从 Enter 成功开始，无论中间哪一步抛异常，Leave 都必须配对送出：
+    // 否则服务端仍认为我们在上一家庭里，下一次 Enter 可能被拒，
+    // 进而被 handleFriendEnterError 当成「无效好友」移出列表甚至自动拉黑。
+    // doFriendOperation / probeFriendDog 早就是用 finally 收尾的，这条主路径之前漏了。
+    try {
+        const plantBlacklist: number[] = getPlantBlacklist(accountId);
+        const status: AnalyzeResult = analyzeFriendLands(lands, myGid, name, { plantBlacklist });
 
-    // 成熟计划精确校准：地块 phases 里的成熟墙钟比摘要 ripe_time_sec 准，覆盖写入（老版本逻辑移植）。
-    observeFriendLands(gid, lands, { name });
+        // 成熟计划精确校准：地块 phases 里的成熟墙钟比摘要 ripe_time_sec 准，覆盖写入（老版本逻辑移植）。
+        observeFriendLands(gid, lands, { name });
 
-    // 执行操作
-    const actions: string[] = [];
+        // 执行操作
+        const actions: string[] = [];
 
-    // 1. 帮助操作 (除草/除虫/浇水)
-    const protectDogBypass: boolean = protectDogBypassEnabled && canBypassHelpExpLimitForProtectDog(enterReply);
-    const effectiveStopWhenExpLimit: boolean = stopWhenExpLimit && !protectDogBypass;
-    if (!helpEnabled) {
-        // 自动帮忙关闭，直接跳过帮助操作
-    } else if (effectiveStopWhenExpLimit && !schedulerRef().getCanGetHelpExp()) {
-        // 今日已达到经验上限后停止帮忙
-    } else {
-        const allHelpLandIds: number[] = [...new Set([...status.needWeed, ...status.needBug, ...status.needWater])];
-        const allExpIds: number[] = [10005, 10006, 10007];
-        const allowByExp: boolean = (!effectiveStopWhenExpLimit) || (schedulerRef().canGetExpByCandidates(allExpIds) && schedulerRef().getCanGetHelpExp());
-        if (allHelpLandIds.length > 0 && allowByExp) {
-            const outcome: FarmingOutcome = await runFarmingWithFallback(gid, allHelpLandIds, stopWhenExpLimit, getHelpSnapshotKey(lands));
-            if (outcome.landCount > 0) {
-                const parts: string[] = [];
-                if (status.needWeed.length) parts.push(`草${status.needWeed.length}`);
-                if (status.needBug.length) parts.push(`虫${status.needBug.length}`);
-                if (status.needWater.length) parts.push(`水${status.needWater.length}`);
-                actions.push(`一键务农${outcome.landCount}块/${outcome.operationCount}项(${parts.join('/')})`);
-                if (outcome.dogSkillGiftCount > 0) actions.push(`同气连枝礼包x${outcome.dogSkillGiftCount}(自动获得)`);
-                totalActions.farming += outcome.landCount;
-                recordHelpFarmingSplit(status, outcome);
+        // 1. 帮助操作 (除草/除虫/浇水)
+        const protectDogBypass: boolean = protectDogBypassEnabled && canBypassHelpExpLimitForProtectDog(enterReply);
+        const effectiveStopWhenExpLimit: boolean = stopWhenExpLimit && !protectDogBypass;
+        if (!helpEnabled) {
+            // 自动帮忙关闭，直接跳过帮助操作
+        } else if (effectiveStopWhenExpLimit && !schedulerRef().getCanGetHelpExp()) {
+            // 今日已达到经验上限后停止帮忙
+        } else {
+            const allHelpLandIds: number[] = [...new Set([...status.needWeed, ...status.needBug, ...status.needWater])];
+            const allExpIds: number[] = [10005, 10006, 10007];
+            const allowByExp: boolean = (!effectiveStopWhenExpLimit) || (schedulerRef().canGetExpByCandidates(allExpIds) && schedulerRef().getCanGetHelpExp());
+            if (allHelpLandIds.length > 0 && allowByExp) {
+                const outcome: FarmingOutcome = await runFarmingWithFallback(gid, allHelpLandIds, stopWhenExpLimit, getHelpSnapshotKey(lands));
+                if (outcome.landCount > 0) {
+                    const parts: string[] = [];
+                    if (status.needWeed.length) parts.push(`草${status.needWeed.length}`);
+                    if (status.needBug.length) parts.push(`虫${status.needBug.length}`);
+                    if (status.needWater.length) parts.push(`水${status.needWater.length}`);
+                    actions.push(`一键务农${outcome.landCount}块/${outcome.operationCount}项(${parts.join('/')})`);
+                    if (outcome.dogSkillGiftCount > 0) actions.push(`同气连枝礼包x${outcome.dogSkillGiftCount}(自动获得)`);
+                    totalActions.farming += outcome.landCount;
+                    recordHelpFarmingSplit(status, outcome);
+                }
             }
         }
-    }
 
-    // 2. 偷菜操作
-    if (stealEnabled && status.stealable.length > 0) {
-        const targetLands: number[] = status.stealable;
+        // 2. 偷菜操作
+        if (stealEnabled && status.stealable.length > 0) {
+            const targetLands: number[] = status.stealable;
 
-        // 偷菜延迟：设置里的「偷菜延迟 (秒)」在执行偷取前生效，带 ±30% 随机抖动。
-        const stealDelaySec: number = getStealDelaySeconds(accountId);
-        if (stealDelaySec > 0) {
-            const delayMs: number = stealDelaySec * 1000;
-            await randomDelay(Math.round(delayMs * 0.7), Math.round(delayMs * 1.3));
+            // 偷菜延迟：设置里的「偷菜延迟 (秒)」在执行偷取前生效，带 ±30% 随机抖动。
+            const stealDelaySec: number = getStealDelaySeconds(accountId);
+            if (stealDelaySec > 0) {
+                const delayMs: number = stealDelaySec * 1000;
+                await randomDelay(Math.round(delayMs * 0.7), Math.round(delayMs * 1.3));
+            }
+
+            let ok: number = 0;
+            const stolenPlants: string[] = [];
+
+            // 尝试批量偷取
+            try {
+                await stealHarvest(gid, targetLands);
+                ok = targetLands.length;
+                targetLands.forEach((id: number) => {
+                    const info: any = status.stealableInfo.find((x: any) => x.landId === id);
+                    if (info) stolenPlants.push(info.name);
+                });
+            } catch {
+                // 批量失败，降级为单个
+                for (const landId of targetLands) {
+                    try {
+                        await stealHarvest(gid, [landId]);
+                        ok++;
+                        const info: any = status.stealableInfo.find((x: any) => x.landId === landId);
+                        if (info) stolenPlants.push(info.name);
+                    } catch { /* ignore */ }
+                    await randomDelay(500, 800);
+                }
+            }
+
+            if (ok > 0) {
+                const plantNames: string = [...new Set(stolenPlants)].join('/');
+                actions.push(`偷${ok}${plantNames ? `(${  plantNames  })` : ''}`);
+                totalActions.steal += ok;
+                recordOperation('steal', ok);
+                await randomDelay(200, 350);
+            }
         }
 
-        let ok: number = 0;
-        const stolenPlants: string[] = [];
+        // 3. 捣乱操作 (放虫/放草)
+        if (badEnabled && !schedulerRef().isBadOperationLimitReached()) {
+            if (status.canPutWeed.length > 0) {
+                const remaining: number = schedulerRef().getRemainingBadOperationTimes();
+                const toProcess: number[] = status.canPutWeed.slice(0, remaining);
+                const ok: number = await putWeeds(gid, toProcess);
+                if (ok > 0) { actions.push(`放草${ok}`); totalActions.putWeed += ok; }
+                if (!schedulerRef().isBadOperationLimitReached()) await randomDelay(500, 800);
+            }
 
-        // 尝试批量偷取
-        try {
-            await stealHarvest(gid, targetLands);
-            ok = targetLands.length;
-            targetLands.forEach((id: number) => {
-                const info: any = status.stealableInfo.find((x: any) => x.landId === id);
-                if (info) stolenPlants.push(info.name);
-            });
-        } catch {
-            // 批量失败，降级为单个
-            for (const landId of targetLands) {
-                try {
-                    await stealHarvest(gid, [landId]);
-                    ok++;
-                    const info: any = status.stealableInfo.find((x: any) => x.landId === landId);
-                    if (info) stolenPlants.push(info.name);
-                } catch { /* ignore */ }
+            if (!schedulerRef().isBadOperationLimitReached() && status.canPutBug.length > 0) {
+                const remaining: number = schedulerRef().getRemainingBadOperationTimes();
+                const toProcess: number[] = status.canPutBug.slice(0, remaining);
+                const ok: number = await putInsects(gid, toProcess);
+                if (ok > 0) { actions.push(`放虫${ok}`); totalActions.putBug += ok; }
                 await randomDelay(500, 800);
             }
         }
 
-        if (ok > 0) {
-            const plantNames: string = [...new Set(stolenPlants)].join('/');
-            actions.push(`偷${ok}${plantNames ? `(${  plantNames  })` : ''}`);
-            totalActions.steal += ok;
-            recordOperation('steal', ok);
-            await randomDelay(200, 350);
-        }
-    }
-
-    // 3. 捣乱操作 (放虫/放草)
-    if (badEnabled && !schedulerRef().isBadOperationLimitReached()) {
-        if (status.canPutWeed.length > 0) {
-            const remaining: number = schedulerRef().getRemainingBadOperationTimes();
-            const toProcess: number[] = status.canPutWeed.slice(0, remaining);
-            const ok: number = await putWeeds(gid, toProcess);
-            if (ok > 0) { actions.push(`放草${ok}`); totalActions.putWeed += ok; }
-            if (!schedulerRef().isBadOperationLimitReached()) await randomDelay(500, 800);
+        if (actions.length > 0) {
+            log('好友', `${name}: ${actions.join('/')}`, {
+                module: 'friend', event: '照顾好友', result: 'ok', friendName: name, friendGid: gid, actions
+            });
         }
 
-        if (!schedulerRef().isBadOperationLimitReached() && status.canPutBug.length > 0) {
-            const remaining: number = schedulerRef().getRemainingBadOperationTimes();
-            const toProcess: number[] = status.canPutBug.slice(0, remaining);
-            const ok: number = await putInsects(gid, toProcess);
-            if (ok > 0) { actions.push(`放虫${ok}`); totalActions.putBug += ok; }
-            await randomDelay(500, 800);
-        }
+        return { acted: actions.length > 0, entered: true };
+    } finally {
+        // 统一在 finally 里送 Leave，正常路径与异常路径都只发一次。
+        try { await leaveFriendFarm(gid); } catch { /* ignore */ }
     }
-
-    if (actions.length > 0) {
-        log('好友', `${name}: ${actions.join('/')}`, {
-            module: 'friend', event: '照顾好友', result: 'ok', friendName: name, friendGid: gid, actions
-        });
-    }
-
-    await leaveFriendFarm(gid);
-    return { acted: actions.length > 0, entered: true };
 }
 
 // ============ 缓存管理 ============

@@ -31,10 +31,14 @@ const events = computed<any[]>(() => (data.value?.events || []).filter((v: any) 
 const question = computed(() => data.value?.events.find((v: any) => v.id === questionId.value))
 const nextBoundary = computed(() => {
   const snapshotTime = Number(data.value?.serverTime || 0)
-  const times = (data.value?.events || []).flatMap((event: any) => [event.startTime, event.endTime + 1])
-  if (data.value?.events.some((event: any) => event.quizWrongToday))
+  const events = Array.isArray(data.value?.events) ? data.value.events : []
+  const times = events.flatMap((event: any) => [event.startTime, event.endTime + 1])
+  if (events.some((event: any) => event.quizWrongToday))
     times.push((Math.floor((snapshotTime + 28800) / 86400) + 1) * 86400 - 28800)
-  return Math.min(...times.filter((time: number) => time > snapshotTime))
+  // 没有未来边界时 Math.min() 无参会返回 Infinity；显式写出来，并过滤掉
+  // NaN / 非有限时间，避免 computed 在后端返回缺 events 的数据时直接抛错白屏。
+  const future = times.filter((time: number) => Number.isFinite(time) && time > snapshotTime)
+  return future.length ? Math.min(...future) : Number.POSITIVE_INFINITY
 })
 const dayFormat = new Intl.DateTimeFormat('zh-CN', { month: 'numeric', day: 'numeric', timeZone: 'Asia/Shanghai' })
 // 撕页日历：开始日期的月、日，以及结束日（同月只写日）
@@ -134,6 +138,15 @@ async function request(action = '', input: any = {}) {
         toast.error(error.value)
         data.value = null
         questionId.value = 0
+      }
+      else {
+        // 首次加载失败后 data 仍为 null → nextBoundary 是 Infinity，
+        // 「到时间边界自动刷新」那条路永远走不到，页面会一直停在错误态。
+        // 排一次 10 秒后的重试；切号 / 卸载 / 新请求都会递增 sequence 使其作废。
+        window.setTimeout(() => {
+          if (revision === sequence && !data.value)
+            void request()
+        }, 10000)
       }
     }
   }

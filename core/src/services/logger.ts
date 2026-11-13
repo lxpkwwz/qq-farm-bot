@@ -86,6 +86,11 @@ function ensureFallbackLogDir(): string {
     const dataDir = ensureDataDir();
     const dir = path.join(dataDir, 'logs');
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    // 降级模式写的是同一对 combined.log / error.log，也必须受体积上限约束。
+    // 原来只有 winston 初始化成功时才启动守卫，可 winston 加载失败恰恰就是
+    // 最容易无限追加的场景（容器里依赖被裁剪），logs 是会一直涨的命名卷。
+    // startLogSizeGuard 幂等（已有 logTrimTimer 直接返回）。
+    startLogSizeGuard(dir, parsePositiveInt(process.env.LOG_MAX_SIZE_MB, 100) * 1024 * 1024);
     fallbackLogDir = dir;
     return fallbackLogDir;
 }

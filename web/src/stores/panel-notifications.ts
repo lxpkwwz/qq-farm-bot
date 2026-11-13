@@ -28,6 +28,8 @@ export const usePanelNotificationStore = defineStore('panel-notifications', () =
   const accountId = ref('')
   const lastReadAt = ref(0)
   const loading = ref(false)
+  /** 正在拉取的账号：按账号去重，切号时新账号不会被上一个账号的在途请求挡掉。 */
+  const inflight = new Set<string>()
 
   const unreadCount = computed(() => items.value.filter(item => Number(item.createdAt) > lastReadAt.value).length)
 
@@ -42,17 +44,23 @@ export const usePanelNotificationStore = defineStore('panel-notifications', () =
       items.value = []
       return
     }
-    accountId.value = id
-    lastReadAt.value = readAt(id)
-    if (loading.value)
+    if (accountId.value !== id) {
+      // 切号瞬间必须先把上一个账号的消息清掉：否则在下一轮拉取成功之前，
+      // 铃铛里显示的是别人的通知，未读数也是别人的。
+      accountId.value = id
+      items.value = []
+      lastReadAt.value = readAt(id)
+    }
+    if (inflight.has(id))
       return
+    inflight.add(id)
     loading.value = true
     try {
       const response = await api.get('/api/panel-notifications', {
         headers: { 'x-account-id': id },
         skipErrorToast: true,
       } as any)
-      if (!response.data?.ok || currentAccountId() !== id)
+      if (!response.data?.ok || accountId.value !== id)
         return
       const list = response.data.data
       items.value = Array.isArray(list) ? list : []
@@ -61,7 +69,8 @@ export const usePanelNotificationStore = defineStore('panel-notifications', () =
       // 通知是附加信息，读失败时保留上一批，不弹错误提示
     }
     finally {
-      loading.value = false
+      inflight.delete(id)
+      loading.value = inflight.size > 0
     }
   }
 

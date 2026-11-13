@@ -92,6 +92,19 @@ export const useFarmStore = defineStore('farm', () => {
   const interactionUsedLandIds = ref<Record<string, string[]>>({})
   const fertilizePending = ref(false)
   const fertilizeError = ref('')
+  /**
+   * 操作后的「补刷」必须先确认账号没被切走。
+   * 原来 POST 成功后无条件 `await fetchLands(accountId)` 用的是操作发起时的旧入参；
+   * 这次补刷是一笔全新请求，会拿到最新序号、绕过 resetLandState 的守卫，
+   * 把 A 的土地写进已切到 B 的面板，还会重建 60s TTL 的 landOverlay。
+   */
+  function accountWasSwitched(accountId: string): boolean {
+    if (typeof localStorage === 'undefined')
+      return false
+    const current = String(localStorage.getItem('current_account_id') || '').trim()
+    return !!current && current !== accountId
+  }
+
   let landRequestSequence = 0
   let fertilizeRequestSequence = 0
   let interactionItemsRequestSequence = 0
@@ -458,8 +471,10 @@ export const useFarmStore = defineStore('farm', () => {
     if (!res.data?.ok) {
       throw new Error(getApiErrorMessage(res.data, '农场操作失败'))
     }
-    landOverlay = null
-    await fetchLands(accountId)
+    if (!accountWasSwitched(accountId)) {
+      landOverlay = null
+      await fetchLands(accountId)
+    }
     const result = res.data?.data || { hadWork: false, actions: [] }
     if (result && typeof result.message === 'string')
       result.message = normalizeApiErrorMessage(result.message)
@@ -476,8 +491,10 @@ export const useFarmStore = defineStore('farm', () => {
     } as any)
     if (!res.data?.ok)
       throw new Error(getApiErrorMessage(res.data, '铲除作物失败'))
-    landOverlay = null
-    await fetchLands(accountId)
+    if (!accountWasSwitched(accountId)) {
+      landOverlay = null
+      await fetchLands(accountId)
+    }
     return res.data.data ?? true
   }
 

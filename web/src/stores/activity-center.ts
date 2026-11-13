@@ -1754,6 +1754,9 @@ export const useActivityCenterStore = defineStore('activity-center', () => {
     loadedAccountId.value = ''
     serverClockOffset.value = 0
     clearWeatherFriends()
+    // 旧账号在途的 load promise 不能留给新账号复用：它的 version 已被上面的 ++ 作废，
+    // 复用会让 refresh(force) 返回 false 且不发任何请求，活动页一片空白。
+    pendingLoads.clear()
     pendingActions.value = { claimPass: false, lightConstellation: false, claimSolar: false, exchange: false, claimQixiBridge: false, giftQixiSachet: false, claimQingMeiSeed: false, startQingMeiBrew: false, continueQingMeiBrew: false, settleQingMeiBrew: false, claimCharitySeeds: false, donateCharityLove: false, claimCharityDailyGift: false, claimCharityProgress: false, lightWeatherResearch: false, buyWeatherBottle: false, scanWeatherFriends: false, collectWeatherBottle: false, summonWeatherRain: false }
   }
 
@@ -1904,7 +1907,10 @@ export const useActivityCenterStore = defineStore('activity-center', () => {
     const requestedAccountId = String(accountId || '').trim()
     if (!requestedAccountId || pendingActions.value[key])
       return false
-    const version = requestVersion.value
+    // 取得独占版本：切号 watch 与 refresh 都会 ++requestVersion，如果 mutate 只是读当前值，
+    // 任何并发加载都会把「后端已执行成功」的操作结果判为过期而静默丢弃，用户点了没反应、
+    // 往往重复点击造成重复领取。让并发加载让位于用户主动发起的操作。
+    const version = ++requestVersion.value
     pendingActions.value[key] = true
     actionError.value = ''
     notice.value = ''

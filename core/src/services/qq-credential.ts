@@ -31,6 +31,25 @@ const REQUEST_TIMEOUT_MS = 2500;
  */
 const UNSUPPORTED_CODES = /^(?:TASK_EXPIRED|LOGOUT_REQUIRED|WORKFLOW_BUSY|INVALID_SIGNATURE|SIGNATURE_REQUIRED)$/i;
 
+/**
+ * uin 归一化：只保留数字并去掉前导 0。
+ * 插件的 selfProfile 走的是 `String(info.uin || info.user_id || info.qq)`，
+ * 不同 NapCat 版本可能给数字或字符串；非数字内容（拿不到资料时的空串）原样返回。
+ */
+function normalizeUin(raw: any): string {
+    const text = String(raw === null || raw === undefined ? '' : raw).trim();
+    if (!text) return '';
+    const digits = text.replace(/\D/g, '');
+    if (!digits) return text;
+    return digits.replace(/^0+/, '') || '0';
+}
+
+/** 日志里只露末四位，避免把完整 QQ 号写进错误信息。 */
+function maskUin(value: string): string {
+    const text = String(value || '');
+    return text.length <= 4 ? text : `***${text.slice(-4)}`;
+}
+
 export interface QqCodeRefreshResult {
     ok: boolean;
     code?: string;
@@ -105,6 +124,20 @@ async function tryRefreshQqGameCode(accountId: unknown): Promise<QqCodeRefreshRe
         const data = response?.data;
         const code = extractCode(data);
         if (code) {
+            // 内置 NapCat 插件的 /miniapp 忽略请求里的 uin，签发的永远是
+            // 「当前 NapCat 里登录那个 QQ」的 Code，并把真实 uin 一并回传。
+            // 我们之前拿到 Code 就直接写盘，两个 QQ 账号（或在 NapCat 里换过号）时
+            // 会把 A 的 Code 写进 B 的账号，然后以 B 的名义跑 A 的农场，面板完全不报错。
+            // 这里做一次守卫：两边都能解析出 uin 且不一致时拒绝写入。
+            const issuedUin: string = normalizeUin(data?.uin);
+            const expectedUin: string = normalizeUin(account.uin || account.qq);
+            if (issuedUin && expectedUin && issuedUin !== expectedUin) {
+                return {
+                    ok: false,
+                    error: `QQ 授权服务返回的账号(${maskUin(issuedUin)})与当前账号(${maskUin(expectedUin)})不一致，已拒绝写入。`
+                        + '请确认 NapCat 里登录的是同一个 QQ。',
+                };
+            }
             store.addOrUpdateAccount({ id: String(account.id), code });
             return { ok: true, code };
         }

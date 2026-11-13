@@ -247,3 +247,49 @@ test('同日重启：金币/经验/点券基线为 null（跨天已清空）时�
     assert.equal(next.sessionExpGained, 100);
     assert.equal(next.sessionCouponGained, 10);
 });
+
+test('部分基线缺失时逐字段补齐，不覆盖已有的当日基线', (t) => {
+    const dataDir = makeDataDir(t);
+    const api = loadStats(dataDir);
+    // 登录回包只拿到金币，经验缺失（null = 未知）
+    api.initStatsWithPersistence('acc-1', 1000, null, 0);
+    api.resetSessionGains();
+
+    const stats = api.getStats({}, state(1200, 5000, 0, 0), true, {});
+    assert.equal(stats.sessionGoldGained, 200, '已知的金币基线必须保留，不能被当前余额覆盖成 0 收益');
+    assert.equal(stats.sessionExpGained, 0, '缺失的经验基线用首次观测补齐，当日净值从 0 起算');
+});
+
+test('登录时余额未知（缺字段）不把整个账户余额算成今日净增', (t) => {
+    const dataDir = makeDataDir(t);
+    const api = loadStats(dataDir);
+    // 登录回包缺 gold/exp/coupon：传 null 表示「未知」，不能当 0
+    api.initStatsWithPersistence('acc-1', null, null, null);
+    api.resetSessionGains();
+
+    const first = api.getStats({}, state(99999, 12345, 7, 0), true, {});
+    assert.equal(first.sessionGoldGained, 0, '首次观测只起算，不算收益');
+    assert.equal(first.sessionExpGained, 0);
+    assert.equal(first.runGoldGained, 0, '本次运行增量同样从首次观测起算，不能凭空等于全部余额');
+
+    const later = api.getStats({}, state(100099, 12345, 7, 0), true, {});
+    assert.equal(later.sessionGoldGained, 100);
+    assert.equal(later.runGoldGained, 100);
+});
+
+test('跨日落盘用计数的归属日，而不是落盘那一刻的日期', () => {
+    // 23:59:5x 记下最后一次操作、00:00:0x 才落盘时，旧写法会把昨天全天计数写成「今天」的数，
+    // 同日重启就按 saved.date === todayKey 把昨天累计当今天恢复。这条断言锁住归属日来源。
+    const src = fs.readFileSync(statsSource, 'utf8');
+    const doSave = src.slice(src.indexOf('function doSave('), src.indexOf('function initStats('));
+    assert.match(doSave, /checkAndResetDailyStats\(\)/, '落盘前必须先做跨日检查');
+    assert.match(doSave, /const dateKey: string = currentDateKey \|\| getTodayKey\(\)/, '日期键必须取归属日');
+    assert.doesNotMatch(doSave, /date: getTodayKey\(\)/, '不能在落盘时重新取当时日期');
+});
+
+test('服务器时间回退不重置当日统计', () => {
+    const src = fs.readFileSync(statsSource, 'utf8');
+    const reset = src.slice(src.indexOf('function checkAndResetDailyStats('), src.indexOf('function scheduleSave('));
+    assert.match(reset, /if \(todayKey < currentDateKey\) \{/, '日期键回退必须单独处理');
+    assert.match(reset, /忽略本次重置/, '回退时只告警，清数据会把当天累计清零');
+});

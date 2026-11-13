@@ -48,6 +48,8 @@ const warnedKeys = new Set<string>();
 
 let ticking = false;
 let timer: any = null;
+/** 降级通道（无 workerScheduler）里那条 10 秒首跑的句柄，stop 时必须能取消。 */
+let fallbackInitialTimer: any = null;
 /** 启动/停止之间记住 scheduler，便于 stop 时清理一次性任务（含三个事件驱动唤醒）。 */
 let workerSchedulerRef: any = null;
 
@@ -945,7 +947,10 @@ function startActivityAutomation(workerScheduler: any, intervalMs: number = 5 * 
     }
     timer = setInterval(() => runWithRequestClass('farm', tick), intervalMs);
     if (typeof timer.unref === 'function') timer.unref();
-    setTimeout(() => runWithRequestClass('farm', tick), 10 * 1000);
+    const initial = setTimeout(() => runWithRequestClass('farm', tick), 10 * 1000);
+    if (initial && typeof initial.unref === 'function') initial.unref();
+    // 句柄必须留着，否则 stop 之后这条 10 秒后的首跑仍会对旧账号动手。
+    fallbackInitialTimer = initial;
 }
 
 function stopActivityAutomation(): void {
@@ -953,7 +958,14 @@ function stopActivityAutomation(): void {
         clearInterval(timer);
     }
     timer = null;
+    if (fallbackInitialTimer != null) {
+        try { clearTimeout(fallbackInitialTimer); } catch {}
+        fallbackInitialTimer = null;
+    }
     if (typeof workerSchedulerRef?.clear === 'function') {
+        // activity_automation_interval 是主循环本身：漏清会让 stop 之后的每个周期
+        // 仍然按旧账号的开关跑一轮活动，切号/停机都拦不住。
+        workerSchedulerRef.clear('activity_automation_interval');
         workerSchedulerRef.clear('activity_automation_initial');
         workerSchedulerRef.clear('activity_automation_after_save');
     }

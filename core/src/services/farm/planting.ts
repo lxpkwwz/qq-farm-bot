@@ -30,6 +30,8 @@ const {
     createFailureCooldown,
     buildPlantingRoundSignature,
     createPlantingRoundGate,
+    getLayoutClearMetrics,
+    isQualifiedForWaiting,
 } = require('./reservation-window');
 const {
     ALL_FERTILIZER_LAND_TYPES,
@@ -620,10 +622,19 @@ async function runPlantFromBagSeeds(landsToPlant: any[], landTypeById?: Map<numb
                 if (reservation) {
                     reservationWindow.release(String(reservation.key), occupants);
                 } else if (canReserve) {
-                    // 之前在等的组已经不合格：逐组释放并记住各自占用者，防资格恢复后立刻重圈。
+                    // 清理「确实已经不合格」的等待组。注意不能因为当前这个种子凑不齐布局，
+                    // 就把所有活跃等待组一律释放：activeKeys() 是整个 worker 的全局账本，
+                    // 里面还有别的种子仍在 60 秒有效窗口内的等待组。误释放会把它们打成
+                    // released 态，而 occupants 不变时 evaluate 会一直返回 released，
+                    // 该组到换季前再也无法重新圈地，2×2 目标布局被彻底放弃。
+                    // 逐组用真实占用者重算：整组已空出（可以立刻种）或已超出等待窗口，才释放。
                     for (const key of reservationWindow.activeKeys()) {
                         const ids = key.split(',').map(Number);
-                        reservationWindow.release(key, occupantsOf(ids, landMap, qualifyEmptyIds));
+                        const groupOccupants = occupantsOf(ids, landMap, qualifyEmptyIds);
+                        const metrics = getLayoutClearMetrics(ids, landMap, qualifyEmptyIds, nowSec);
+                        if (groupOccupants.size === 0 || !isQualifiedForWaiting(metrics, nowSec)) {
+                            reservationWindow.release(key, groupOccupants);
+                        }
                     }
                 }
                 clearRegisteredLayout(seed.seedId);

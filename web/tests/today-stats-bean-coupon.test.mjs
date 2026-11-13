@@ -91,9 +91,12 @@ test('金豆基线在后端由跨天/登录/持久化三条链路统一接管', 
   assert.match(stats, /const restoredGoldBean = restoreInitialBaseline\(savedInitial\.goldBean\)/, '同日重启恢复基线')
   assert.match(stats, /function restoreInitialBaseline\(raw: any\): number \| null/, 'null/undefined 恢复判定集中在一处')
   assert.match(stats, /if \(raw === null \|\| raw === undefined\) return null;/, '旧存档缺字段时不能把 null 当 0 恢复')
-  assert.match(stats, /function initStats\(gold: number, exp: number, coupon: number = 0, goldBean: number \| null = null\)/, '登录基线可显式传入金豆余额或 null')
+  // 金币/经验/点券与金豆同一套「未知」语义：缺字段传 null，不能当 0 钉成基线。
+  assert.match(stats, /function initStats\(gold: number \| null, exp: number \| null, coupon: number \| null = null, goldBean: number \| null = null\)/, '登录基线可显式传入余额或 null')
+  assert.match(stats, /function toBaseline\(raw: any\): number \| null/, '未知值归一集中在一处')
   assert.match(stats, /initialState\.goldBean = b !== null && Number\.isFinite\(b\) && b >= 0 \? b : null/, '传 null 时基线保持空，传 0（背包确认过的合法余额）才算基线')
-  assert.match(worker, /goldBeanReady \? Number\(latest\.goldBean \|\| 0\) : null/, '背包同步失败时不能把占位 0 当基线传给统计模块')
+  assert.match(worker, /goldBeanReady \? \(latest\.goldBean \?\? 0\) : null/, '背包同步失败时不能把占位 0 当基线传给统计模块')
+  assert.match(worker, /latest\.gold \?\? null/, '登录余额缺字段时要传 null 而不是 Number(x \|\| 0) 的假 0')
   assert.match(worker, /goldBeanReady = true/, '背包同步成功才允许用登录余额作基线')
 })
 

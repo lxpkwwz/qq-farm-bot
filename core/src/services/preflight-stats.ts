@@ -18,8 +18,9 @@ export {};
  * 读写全部包 try/catch：账本落盘失败绝不能影响续期主流程。
  */
 
+const fs = require('node:fs');
 const { getDataFile } = require('../config/runtime-paths');
-const { readJsonFile, writeJsonFileAtomic } = require('./json-db');
+const { readJsonFileStrict, writeJsonFileAtomic } = require('./json-db');
 
 const DEFAULT_FILE: string = getDataFile('preflight-stats.json');
 const UTC8_OFFSET_MS = 8 * 3600_000;
@@ -93,9 +94,24 @@ function normalize(raw: any, date: string): PreflightStatsFile {
 function createPreflightStats(options: StoreOptions = {}) {
     const filePath = options.filePath || DEFAULT_FILE;
     const nowFn = options.nowFn || Date.now;
-    const readJson = options.readJson || readJsonFile;
+    // 必须用 strict 版：宽松版把「文件不存在」「JSON 损坏」「权限错误」都返回同一个 fallback，
+    // 调用方无法区分。一旦把损坏当成空账本，紧接着的一次 persist 就会用空表覆盖原文件，
+    // 全部账号的 lastSuccessAt / 当日计数永久丢失，日志里还不留痕迹。
+    const readJson = options.readJson || readJsonFileStrict;
     const writeJson = options.writeJson || writeJsonFileAtomic;
     let state: PreflightStatsFile | null = null;
+
+    /** 账本文件损坏时先留档，避免后续 persist 用空表把唯一副本覆盖掉。 */
+    function quarantineCorruptFile(): void {
+        try {
+            const backup = `${filePath}.corrupt-${Date.now()}`;
+            fs.renameSync(filePath, backup);
+            // eslint-disable-next-line no-console
+            console.warn(`[续期账本] 文件损坏，已另存为 ${backup} 并重新开始记录`);
+        } catch {
+            // 留档失败只能放弃（例如目录只读），至少不阻断续期主流程
+        }
+    }
 
     function load(now: number): PreflightStatsFile {
         if (!state) {
@@ -104,6 +120,7 @@ function createPreflightStats(options: StoreOptions = {}) {
                 raw = readJson(filePath, () => ({}));
             }
             catch {
+                quarantineCorruptFile();
                 raw = null;
             }
             state = normalize(raw, utc8Date(now));

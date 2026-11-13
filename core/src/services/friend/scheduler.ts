@@ -203,7 +203,12 @@ export function canGetExpByCandidates(opIds: number[] = []): boolean {
  */
 export function canGetExp(opId: number): boolean {
     const limit: any = operationLimits.get(opId);
-    if (!limit) return false;  // 没有限制信息，保守起见不帮助（等待限制数据）
+    // 没有限制数据时必须放行，不能判死：operationLimits 只由「偷菜 / 捣乱 / 务农」
+    // 的回包写入，而这些请求本身又被这个闸门挡着。只开「帮忙」时（很常见的配置）
+    // 永远不会有数据进来，判定为 false 就成了自锁——帮忙永远不执行，
+    // 而且 buildFriendVisitPlan 用的是另一个标志 canGetHelpExp，仍会安排拜访，
+    // 结果每轮对每位好友进一次农场、什么都不做。与同文件 canOperate 的口径保持一致。
+    if (!limit) return true;
     if (limit.dayExpTimesLimit <= 0) return true;  // 没有经验上限
     return limit.dayExpTimes < limit.dayExpTimesLimit;
 }

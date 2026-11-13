@@ -23,6 +23,10 @@ function loadPersistedStats(accountId: string): any {
     }
 }
 
+// 落盘失败只告警一次：原来异常被完全吞掉，容器以只读卷/磁盘写满启动时，
+// 面板还在显示「今日收获 N」，重启后 N 全部消失，排障时没有任何线索。
+let persistFailureLogged = false;
+
 function savePersistedStats(accountId: string, data: any): void {
     try {
         const filePath: string = getStatsFilePath(accountId);
@@ -30,11 +34,16 @@ function savePersistedStats(accountId: string, data: any): void {
         if (!fs.existsSync(dir)) {
             fs.mkdirSync(dir, { recursive: true });
         }
-        const tmpPath: string = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+        const tmpPath: string = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`;
         fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf8');
         fs.renameSync(tmpPath, filePath);
-    } catch {
-        // ignore
+        persistFailureLogged = false;
+    } catch (e: any) {
+        if (!persistFailureLogged) {
+            persistFailureLogged = true;
+            // eslint-disable-next-line no-console
+            console.warn(`[统计] 今日统计落盘失败，重启后当日计数会丢失: ${e?.code || ''} ${e?.message || e}`);
+        }
     }
 }
 
@@ -166,6 +175,14 @@ function checkAndResetDailyStats(): void {
     if (!currentAccountId) return;
     const todayKey: string = getTodayKey();
     if (currentDateKey && currentDateKey !== todayKey) {
+        // 日期键来自服务器时间（登录/心跳都会 syncServerTime），可能被校正而回退。
+        // 回退不是新的一天：此时重置会把当天已经累计的统计全部清零，
+        // 若两个日期键来回抖动，会每个状态同步周期清一次，当日统计彻底不可用。
+        // 只有真正向前跨日才重置；回退只告警，当前归属日保持不变。
+        if (todayKey < currentDateKey) {
+            console.warn(`[统计] 检测到日期回退，忽略本次重置 (${currentDateKey} -> ${todayKey})`);
+            return;
+        }
         console.warn(`[统计] 检测到跨天，重置每日统计 (${currentDateKey} -> ${todayKey})`);
         Object.keys(operations).forEach((key: string) => {
             operations[key] = 0;
@@ -195,9 +212,15 @@ function scheduleSave(): void {
 
 function doSave(): void {
     if (!currentAccountId) return;
-    const todayKey: string = getTodayKey();
+    // 落盘用的日期键必须是「这批计数归属的那一天」，不能是落盘那一刻的日期。
+    // scheduleSave 是 2 秒防抖：23:59:5x 记下最后一次操作、00:00:0x 才落盘时，
+    // 旧写法会把昨天全天的计数写成「今天」的数；同日重启就按 saved.date === todayKey
+    // 把昨天的累计当成今天恢复，一整天都虚高。
+    // 先做一次跨日检查（内部保证日期单调前进），再取归属日。
+    checkAndResetDailyStats();
+    const dateKey: string = currentDateKey || getTodayKey();
     const data: any = {
-        date: todayKey,
+        date: dateKey,
         operations: { ...operations },
         initialState: { ...initialState },
         savedAt: Date.now(),
@@ -205,14 +228,27 @@ function doSave(): void {
     savePersistedStats(currentAccountId, data);
 }
 
-function initStats(gold: number, exp: number, coupon: number = 0, goldBean: number | null = null): void {
+/**
+ * 把登录时拿到的余额转成「基线或未知」。
+ * 登录回包缺字段时（`undefined` / `null` / NaN）不能当 0：一旦把 0 钉成当日起点，
+ * 之后拿到真实余额就会把整个账户余额算成今日净增，还会被落盘固化。
+ * 与金豆同一套语义：未知就留 null，等首次观测到有效值再起算。
+ */
+function toBaseline(raw: any): number | null {
+    if (raw === null || raw === undefined) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+}
+
+function initStats(gold: number | null, exp: number | null, coupon: number | null = null, goldBean: number | null = null): void {
     sessionStartedAt = Date.now();
-    const g: number = Number.isFinite(Number(gold)) ? Number(gold) : 0;
-    const e: number = Number.isFinite(Number(exp)) ? Number(exp) : 0;
-    const c: number = Number.isFinite(Number(coupon)) ? Number(coupon) : 0;
-    lastState.gold = g;
-    lastState.exp = e;
-    lastState.coupon = c;
+    const g: number | null = toBaseline(gold);
+    const e: number | null = toBaseline(exp);
+    const c: number | null = toBaseline(coupon);
+    // lastState 用 -1 表示「尚未观测」；未知基线交给 updateStats 的首次观测赋值。
+    lastState.gold = g === null ? -1 : g;
+    lastState.exp = e === null ? -1 : e;
+    lastState.coupon = c === null ? -1 : c;
     initialState.gold = g;
     initialState.exp = e;
     initialState.coupon = c;
@@ -235,7 +271,7 @@ function restoreInitialBaseline(raw: any): number | null {
     return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
-function initStatsWithPersistence(accountId: string, gold: number, exp: number, coupon: number = 0, goldBean: number | null = null): void {
+function initStatsWithPersistence(accountId: string, gold: number | null, exp: number | null, coupon: number | null = null, goldBean: number | null = null): void {
     currentAccountId = accountId;
     const todayKey: string = getTodayKey();
     currentDateKey = todayKey;
@@ -308,7 +344,7 @@ function recordGoldExp(gold: number, exp: number): void {
     updateStats(gold, exp);
 }
 
-function setInitialValues(gold: number, exp: number, coupon: number = 0, goldBean: number | null = null): void {
+function setInitialValues(gold: number | null, exp: number | null, coupon: number | null = null, goldBean: number | null = null): void {
     initStats(gold, exp, coupon, goldBean);
 }
 
@@ -323,11 +359,16 @@ function resetSessionGains(): void {
 }
 
 function recomputeSessionTotals(currentGold: number, currentExp: number, currentCoupon: number, currentGoldBean: number): void {
-    if (initialState.gold === null || initialState.exp === null || initialState.coupon === null) {
-        initialState.gold = currentGold;
-        initialState.exp = currentExp;
-        initialState.coupon = currentCoupon;
-    }
+    // 逐字段补基线：原来只要有一个为 null 就把三个一起写成当前余额，
+    // 存档里只要缺一个（例如 exp 被 restoreInitialBaseline 判为非法丢弃），
+    // 已有的金币基线也会被覆盖，当日金币收益瞬间归零。
+    if (initialState.gold === null) initialState.gold = currentGold;
+    if (initialState.exp === null) initialState.exp = currentExp;
+    if (initialState.coupon === null) initialState.coupon = currentCoupon;
+    // 本次运行基线同理：登录时未知的字段在首次观测时起算，避免「本次运行」恒为 0。
+    if (runInitial.gold === null) runInitial.gold = currentGold;
+    if (runInitial.exp === null) runInitial.exp = currentExp;
+    if (runInitial.coupon === null) runInitial.coupon = currentCoupon;
     // 金豆：登录背包同步失败时基线仍为 null，只有观测到有效余额（> 0）才起算，
     // 避免把「尚未同步的占位 0」钉成今日起点。基线未就绪期间净增按 0 显示，
     // 不虚高；等权威余额到达后才开始累计当日净值。

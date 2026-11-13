@@ -3,7 +3,16 @@ import os from 'node:os';
 import path from 'node:path';
 
 function config(ctx) {
-  try { return JSON.parse(fs.readFileSync(ctx.configPath, 'utf8')); } catch { return {}; }
+  try {
+    return JSON.parse(fs.readFileSync(ctx.configPath, 'utf8'));
+  } catch (error) {
+    // 文件不存在 = 首次安装、没配 token，按插件既有约定保持本地免鉴权。
+    // 但「文件在、却读不出 / JSON 损坏」不能再静默当成 {}：那会让 /miniapp、
+    // /logout 这些 NoAuth 路由在本该有 token 时全部敞开，授权 Code 可被任意取走。
+    if (error?.code === 'ENOENT') return {};
+    console.error('[qq-miniapp-openauth] 配置文件不可读，插件路由将拒绝服务：', error?.message || error);
+    return { __configError: String(error?.message || error) };
+  }
 }
 function safe(value, seen = new WeakSet(), depth = 0) {
   if (value == null || ['string', 'number', 'boolean'].includes(typeof value)) return value;
@@ -70,14 +79,24 @@ function authorized(req, res, token) {
 }
 
 export async function plugin_init(ctx) {
-  const token = String(config(ctx).token || '');
+  const loaded = config(ctx);
+  const token = String(loaded.token || '');
+  const configError = String(loaded.__configError || '');
+  // 配置损坏时宁可 503，也不能退回「无 token = 免鉴权」。
+  const guard = (req, res) => {
+    if (configError) {
+      res.status(503).json({ ok: false, error: 'plugin config unreadable' });
+      return false;
+    }
+    return authorized(req, res, token);
+  };
   ctx.router.getNoAuth('/status', async (req, res) => {
-    if (!authorized(req, res, token)) return;
+    if (!guard(req, res)) return;
     const service = misc(ctx);
     res.json({ ok: true, ready: Boolean(service), ...selfProfile(ctx), methods: ['checkSessionForMiniApp', 'loginWithAppId', 'getOpenCodeWithAppId', 'getOpenAuth'].filter(name => typeof service?.[name] === 'function') });
   });
   ctx.router.postNoAuth('/miniapp', async (req, res) => {
-    if (!authorized(req, res, token)) return;
+    if (!guard(req, res)) return;
     const appId = String(req.body?.appId || '');
     if (!/^\d{6,20}$/.test(appId)) return res.status(400).json({ ok: false, error: 'Invalid appId' });
     const service = misc(ctx);
@@ -102,7 +121,7 @@ export async function plugin_init(ctx) {
     res.status(502).json({ ok: false, error: 'QQNT OpenAuth methods returned no authorization code', attempts });
   });
   ctx.router.postNoAuth('/logout', async (req, res) => {
-    if (!authorized(req, res, token)) return;
+    if (!guard(req, res)) return;
     const service = loginService(ctx);
     try {
       for (const method of ['offline', 'logout', 'logOut', 'signOut']) {

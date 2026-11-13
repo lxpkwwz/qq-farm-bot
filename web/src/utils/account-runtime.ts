@@ -17,6 +17,8 @@ export function getAccountRuntimeStatus(account: AccountRuntime, now: number) {
       const seconds = Number.isFinite(deadline) ? Math.max(0, Math.ceil((deadline - now) / 1000)) : 0
       return { text: seconds > 0 ? `掉线重登，剩余 ${seconds} 秒` : '掉线重登，即将登录', color: 'bg-amber-500', busy: false }
     }
+    case 'running':
+      return { text: '运行中', color: 'bg-green-500', busy: false }
     case 'offline':
       return { text: '已掉线', color: 'bg-red-500', busy: false }
     case 'stopping':

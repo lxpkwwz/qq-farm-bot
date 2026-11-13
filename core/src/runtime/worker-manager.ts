@@ -1,5 +1,12 @@
 export {};
 const { createScheduler } = require('../services/scheduler');
+// 账号维度的运行状态账本：面板据此显示「登录中 / 等待重登（倒计时）/ 停止中」。
+// 只在这里和 wx-keepalive 写，data-provider 读。
+const {
+    setAccountRuntimeState,
+    getAccountRuntimeState,
+    clearAccountRuntimeState,
+} = require('../services/account-runtime-state');
 
 const DEFAULT_API_CALL_TIMEOUT_MS = 10000;
 // 好友现场天气需要逐个 Enter/Leave，单批最多 5 位好友；
@@ -160,10 +167,13 @@ function createWorkerManager(options: WorkerManagerOptions) {
         let child: any = null;
         try {
             child = createWorkerProcess(account);
-        } catch (err: any) {
+        }         catch (err: any) {
             const reason = err && err.message ? err.message : String(err || 'unknown error');
             log('错误', `账号 ${account.name} 启动失败: ${reason}`, { accountId: String(account.id), accountName: account.name });
             addAccountLog('start_failed', `账号 ${account.name} 启动失败`, account.id, account.name, { reason });
+            // 连子进程都没建起来：不会有 exit 事件来收尾，状态必须自己落定，
+            // 否则会停在「登录中」/「等待重登」这种「马上就好」的假象里。
+            setAccountRuntimeState(account.id, 'offline');
             return false;
         }
 
@@ -182,6 +192,9 @@ function createWorkerManager(options: WorkerManagerOptions) {
             terminalHandled: false,
             wsError: null,
         };
+        // 子进程已创建但还没连上游戏服：这段时间面板要显示「登录中」，
+        // 而不是跟着 `running=true` 一起显示「运行中」。
+        setAccountRuntimeState(account.id, 'logging_in');
 
         const initialConfigSnapshot = buildConfigSnapshotForAccount(account.id);
         child.send({
@@ -239,6 +252,18 @@ function createWorkerManager(options: WorkerManagerOptions) {
 
             if (current && current.process === child) {
                 delete workers[account.id];
+                // 只从「停止中 / 登录中 / 运行中」收尾。
+                // 断开流程是「先停进程、再排重登」，进程 exit 是异步的，会在
+                // notifyAccountOffline 把状态改成「等待重登」之后才到——不加
+                // onlyFrom 就会把刚写好的倒计时覆盖成「已停止」，用户看不到自愈。
+                //
+                // 收尾成什么也有区别：用户主动停止 → 「已停止」；进程自己挂掉
+                // （崩溃 / 被 OOM 杀掉）→ 「已掉线」，否则面板会把它显示成用户
+                // 自己停的，实际是异常退出等人处理。
+                const previous = getAccountRuntimeState(account.id);
+                setAccountRuntimeState(account.id, previous && previous.state === 'stopping' ? 'stopped' : 'offline', {
+                    onlyFrom: ['stopping', 'logging_in', 'running'],
+                });
             }
         });
         return true;
@@ -257,13 +282,20 @@ function createWorkerManager(options: WorkerManagerOptions) {
         if (!safeSend(proc, { type: 'stop' })) {
             try { proc.kill(); } catch { /* 进程早已退出 */ }
             delete workers[accountId];
+            setAccountRuntimeState(accountId, 'stopped');
             return;
         }
+        // 停止指令已送达，子进程正在退出（最多 1 秒强杀）：面板显示「停止中」，
+        // 并把停止按钮置灰，避免用户在退出间隙连点。
+        setAccountRuntimeState(accountId, 'stopping');
         managerScheduler.setTimeoutTask(`force_kill_${accountId}`, 1000, () => {
             const current = workers[accountId];
             if (current && current.process === proc) {
                 current.process.kill();
                 delete workers[accountId];
+                // 条目已被摘掉，进程 exit 回调会因为 `workers[id]` 不存在而提前返回，
+                // 这里必须自己收尾，否则面板会卡在「停止中」直到 30 秒兜底过期。
+                setAccountRuntimeState(accountId, 'stopped');
             }
         });
     }
@@ -364,6 +396,9 @@ function createWorkerManager(options: WorkerManagerOptions) {
                 worker.disconnectedSince = 0;
                 worker.autoDeleteTriggered = false;
                 worker.wsError = null;
+                // 只有真正连上游戏服才算「运行中」。登录中的子进程同样按 10 秒
+                // 周期上报状态，但 connection.connected 仍是 false，不能提前转态。
+                if (!worker.stopping) setAccountRuntimeState(accountId, 'running');
             } else if (!worker.stopping) {
                 const now = Date.now();
                 if (!worker.disconnectedSince) worker.disconnectedSince = now;
@@ -389,6 +424,7 @@ function createWorkerManager(options: WorkerManagerOptions) {
                     stopWorker(accountId);
                     try {
                         deleteAccount(accountId);
+                        clearAccountRuntimeState(accountId);
                     } catch (e: any) {
                         log('错误', `删除离线账号失败: ${e.message}`);
                     }

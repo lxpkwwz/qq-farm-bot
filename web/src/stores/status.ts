@@ -62,6 +62,7 @@ export const useStatusStore = defineStore('status', () => {
   let socket: Socket | null = null
   let statusRequestSequence = 0
   let diamondRequestSequence = 0
+  let logsRequestSequence = 0
   // 已订阅的账号房间：同一账号不重复 subscribe，
   // 服务端每次 subscribe 都会全量重推 status + logs 快照，重复订阅会让前端数据周期性整体重建。
   let lastSubscribedAccount: string | null = null
@@ -85,6 +86,21 @@ export const useStatusStore = defineStore('status', () => {
     logs.value.push(next)
     if (logs.value.length > 300)
       logs.value = logs.value.slice(-300)
+  }
+
+  /**
+   * 实时推送的账号归属。status 分支早已有守卫，logs 分支原来漏了：
+   * 服务端 logs:snapshot 会带 accountId（未选账号时是 'all'），切号瞬间的旧快照
+   * 会把上一个账号的日志整段灌进新账号视图。
+   */
+  function isRealtimeAccount(body: any): boolean {
+    const incoming = String(body?.accountId || '')
+    if (!incoming)
+      return true
+    const current = currentRealtimeAccountId.value
+    if (incoming === 'all')
+      return !current
+    return !current || incoming === current
   }
 
   function handleRealtimeStatus(payload: any) {
@@ -111,11 +127,16 @@ export const useStatusStore = defineStore('status', () => {
   function handleRealtimeLog(payload: any) {
     if (!realtimeLogsEnabled.value)
       return
+    const body = (payload && typeof payload === 'object') ? payload : {}
+    if (!isRealtimeAccount(body))
+      return
     pushRealtimeLog(payload)
   }
 
   function handleRealtimeLogsSnapshot(payload: any) {
     const body = (payload && typeof payload === 'object') ? payload : {}
+    if (!isRealtimeAccount(body))
+      return
     const list = Array.isArray(body.logs) ? body.logs : []
     logs.value = list.map((item: any) => normalizeLogEntry(item))
   }
@@ -162,7 +183,9 @@ export const useStatusStore = defineStore('status', () => {
     currentRealtimeAccountId.value = nextAccountId
     if (accountChanged) {
       statusRequestSequence++
+      logsRequestSequence++
       status.value = null
+      logs.value = []
       loading.value = false
       error.value = ''
     }
@@ -246,8 +269,13 @@ export const useStatusStore = defineStore('status', () => {
       params.accountId = 'all'
     }
 
+    // Dashboard 每 10s 轮询，切号 watch 也会立刻拉一次；没有序号守卫时
+    // 旧账号晚到的响应会直接覆盖新账号的 logs，实时推送还会继续往里追加。
+    const sequence = ++logsRequestSequence
     try {
       const { data } = await api.get('/api/logs', { headers, params })
+      if (sequence !== logsRequestSequence)
+        return
       if (data.ok) {
         logs.value = data.data
         error.value = ''

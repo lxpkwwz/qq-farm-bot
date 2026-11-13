@@ -84,7 +84,10 @@ function getLevelForecast(user: any, progress: any, stats: any, automation: any,
     const sessionSeconds = Math.max(0, num(stats.sessionElapsedSeconds));
     return calculateLevelForecast({ lands: valid ? snapshot.lands : [], nowSec,
         remainingExp: progress ? num(progress.needed) - num(progress.current) : 0,
-        historyRate: sessionSeconds >= HISTORY_MIN_SECONDS ? Math.max(0, num(stats.sessionExpGained)) / sessionSeconds * 3600 : 0,
+        // 分子必须用「本次运行」增量：sessionElapsedSeconds 在每次登录/重启时归零，
+        // 而 sessionExpGained 是当日累计（同日重启会从存档恢复）。
+        // 两者相除在重启后的头几分钟会把经验/小时放大几十倍，污染满级预测。
+        historyRate: sessionSeconds >= HISTORY_MIN_SECONDS ? Math.max(0, num(stats.runExpGained)) / sessionSeconds * 3600 : 0,
         connected: !!stats.connection?.connected, autoHarvest: !!automation?.farm, quiet });
 }
 

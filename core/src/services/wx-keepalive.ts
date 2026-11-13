@@ -26,6 +26,9 @@ const { refreshAccountCredential, renewOAuthToken, ensureFreshGameCode, hasWxCre
 const { tryRefreshQqGameCode, isQqCodeRefreshConfigured } = require('./qq-credential');
 const { inspectAccountCodeHealth } = require('./code-watch');
 const { classifyProtocolError, computeRefreshBackoff, REFRESH_BACKOFF_MS } = require('./wx-login/recovery-policy');
+// 掉线重登是唯一的「账号不在跑但会自己回来」的窗口，面板要显示倒计时，
+// 所以等待期必须写进账号状态账本，而不是只在内部定时器里。
+const { setAccountRuntimeState, getAccountRuntimeState } = require('./account-runtime-state');
 
 /** 60 秒巡检一次；配合 5 分钟窗口，从到期前 5 分钟起最多有 5 次机会命中。 */
 const TICK_MS = 60_000;
@@ -435,7 +438,11 @@ function tick(): void {
 function notifyAccountOffline(accountId: unknown, reason = 'offline'): void {
     const key = String(accountId);
     const config = getConfig();
-    if (!config.offlineEnabled) return;
+    if (!config.offlineEnabled) {
+        // 没开自动重登：这条连接已经断了、不会自己回来，面板要如实显示「已掉线」。
+        setAccountRuntimeState(key, 'offline');
+        return;
+    }
     const account = findAccount(key);
     const accountName = nameOf(account, key);
     if (!canRecoverAccount(account)) {
@@ -445,13 +452,24 @@ function notifyAccountOffline(accountId: unknown, reason = 'offline'): void {
             accountName,
             reason,
         });
+        setAccountRuntimeState(key, 'offline');
         return;
     }
-    if (offlineTimers.has(key)) return;
+    if (offlineTimers.has(key)) {
+        // 已经有待执行的重登了。第二次掉线不能把状态重置成「停止中」——
+        // 随后的进程退出回调会把它收尾成「已停止」，而账号其实马上就会被拉起来。
+        const pending = getAccountRuntimeState(key);
+        if (pending && pending.state === 'relogin_waiting') {
+            setAccountRuntimeState(key, 'relogin_waiting', { reloginAt: pending.reloginAt });
+        }
+        return;
+    }
 
     const now = Date.now();
     const slot = reserveReconnectSlot(key, now);
     if (!slot.allowed) {
+        // 次数闸门挡住了自动重登，账号不会再被拉起 —— 「已掉线」，不是「等待重登」。
+        setAccountRuntimeState(key, 'offline');
         if (slot.state === 'exhausted') {
             log('错误', `账号 ${accountName} 一小时内已自动重登 ${slot.attempt} 次仍未稳定，暂停 ${Math.round(RECONNECT_PAUSE_MS / 60000)} 分钟；若持续失败请检查凭证或重新扫码`, {
                 accountId: key,
@@ -476,6 +494,9 @@ function notifyAccountOffline(accountId: unknown, reason = 'offline'): void {
         accountName,
         reason,
     });
+    // 等待期内账号确实不在跑，但会自己回来：面板显示「掉线重登，剩余 N 秒」，
+    // 而不是「已停止」（用户会误以为没在自愈而手动去点启动）。
+    setAccountRuntimeState(key, 'relogin_waiting', { reloginAt: now + delayMs });
     const handle = setTimeout(() => {
         offlineTimers.delete(key);
         const latest = findAccount(key);
@@ -483,9 +504,16 @@ function notifyAccountOffline(accountId: unknown, reason = 'offline'): void {
         addAccountLog('auto_reconnect', `账号 ${nameOf(latest, key)} 掉线后尝试自动重登`, key, nameOf(latest, key), { reason });
         // 再兜一层 catch：refreshAndMaybeRestart 内部已经收口异常，这里是第二道保险。
         // 裸 `void` 的拒绝在 Node 20 上按致命错误处理，会直接带走主进程。
-        void refreshAndMaybeRestart(key, 'offline').catch((error: any) => {
-            log('错误', `账号自动重登异常：${String((error && error.message) || error)}`, { accountId: key, reason });
-        });
+        void refreshAndMaybeRestart(key, 'offline')
+            .then((ok: boolean) => {
+                // 换码失败就不会重启，账号停在这儿等人工处理：状态回落成「已掉线」。
+                // 成功路径由 startWorker 写成「登录中」，这里不要抢着写。
+                if (!ok) setAccountRuntimeState(key, 'offline');
+            })
+            .catch((error: any) => {
+                setAccountRuntimeState(key, 'offline');
+                log('错误', `账号自动重登异常：${String((error && error.message) || error)}`, { accountId: key, reason });
+            });
     }, delayMs);
     if (typeof handle.unref === 'function') handle.unref();
     offlineTimers.set(key, handle);
@@ -518,11 +546,26 @@ function applyWxKeepAliveConfig(): void {
     log('系统', `账号在线保障配置已更新：掉线重登${config.offlineEnabled ? `等待 ${config.offlineDelaySeconds} 秒` : '关闭'}，到期前 ${Math.round(RENEW_AHEAD_MS / 60000)} 分钟只滚动授权令牌`);
 }
 
+/**
+ * 撤掉某个账号「等待重登」的定时器。用户手动点停止时必须调用，否则定时器到点
+ * 会把他刚停掉的账号又拉起来 —— 从用户视角就是「点了停止却自己启动了」。
+ * 返回是否真的撤掉了一个待执行的定时器。
+ */
+function cancelPendingRelogin(accountId: unknown): boolean {
+    const key = String(accountId);
+    const handle = offlineTimers.get(key);
+    if (!handle) return false;
+    clearTimeout(handle);
+    offlineTimers.delete(key);
+    return true;
+}
+
 module.exports = {
     startWxKeepAlive,
     stopWxKeepAlive,
     applyWxKeepAliveConfig,
     notifyAccountOffline,
+    cancelPendingRelogin,
     refreshAndMaybeRestart,
     runCodePreflight,
     isCredentialDue,

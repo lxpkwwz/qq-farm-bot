@@ -9,7 +9,7 @@ const { createDataProvider } = require('./data-provider');
 const { createReloginReminderService } = require('./relogin-reminder');
 const { createRuntimeState } = require('./runtime-state');
 const { createWorkerManager } = require('./worker-manager');
-const { startWxKeepAlive, stopWxKeepAlive, applyWxKeepAliveConfig, notifyAccountOffline } = require('../services/wx-keepalive');
+const { startWxKeepAlive, stopWxKeepAlive, applyWxKeepAliveConfig, notifyAccountOffline, cancelPendingRelogin } = require('../services/wx-keepalive');
 const { recordAutoRefreshSuccess, recordAutoRefreshFailure } = require('../services/preflight-stats');
 
 const OPERATION_KEYS = ['harvest', 'water', 'weed', 'bug', 'farming', 'fertilize', 'plant', 'steal', 'helpWater', 'helpWeed', 'helpBug', 'goldenBugClear', 'goldenBugPut', 'taskClaim', 'sell', 'upgrade', 'levelUp', 'tongQiGift'];
@@ -137,6 +137,8 @@ function createRuntimeEngine(options: RuntimeEngineOptions = {}) {
         startWorker,
         stopWorker,
         restartWorker,
+        // 手动停止 / 启动 / 重启要先撤掉「等待重登」，否则定时器到点会把账号拉回来。
+        cancelPendingRelogin,
     });
 
     runtimeEvents.on('log', (entry: any) => {

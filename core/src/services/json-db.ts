@@ -62,12 +62,28 @@ function writeJsonFileAtomic(filePath: string, data: any, space = 2): void {
 
 function writeTextFileAtomic(filePath: string, text = ''): void {
     ensureParentDir(filePath);
-    const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+    // 临时名带随机后缀：worker 与主进程同 pid，同一毫秒写同一路径时只靠
+    // pid+毫秒会撞名，后写者覆盖前者的临时文件，先 rename 的会带走对方的内容。
+    const tmpPath = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`;
 
+    let fd: number | null = null;
     try {
-        fs.writeFileSync(tmpPath, String(text), 'utf8');
+        fd = fs.openSync(tmpPath, 'w');
+        fs.writeFileSync(fd, String(text), 'utf8');
+        // rename 之前必须 fsync：否则断电或容器被 kill 时，目录项已切换但数据还在页缓存里，
+        // 结果是一个 0 字节的「新」文件——对配置类文件等于整份配置归零。
+        try {
+            fs.fsyncSync(fd);
+        } catch {
+            // 少数文件系统（部分网络卷）不支持 fsync，退化为原来的行为
+        }
+        fs.closeSync(fd);
+        fd = null;
         fs.renameSync(tmpPath, filePath);
     } finally {
+        if (fd !== null) {
+            try { fs.closeSync(fd); } catch { /* ignore */ }
+        }
         try {
             if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
         } catch {

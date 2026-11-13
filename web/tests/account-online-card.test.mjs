@@ -22,7 +22,9 @@ test('后端不再有按间隔重启账号的定时重登链路', () => {
   // 到期前预防续期保持常开，且 running 互斥要等巡检真正结束才释放。
   assert.match(keepAlive, /runCodePreflight\(Date\.now\(\)\)/, '到期前预防续期保持常开')
   assert.match(keepAlive, /\.finally\(\(\) => \{\s*running = false;\s*\}\)/, 'running 要等巡检结束才释放')
-  assert.match(keepAlive, /if \(!config\.offlineEnabled\) return;/, '掉线重登依然受独立开关控制')
+  // 开关关闭时仍然立刻返回、不排重登；只是返回前会先落一次「已掉线」状态给面板，
+  // 所以断言从单行 `return;` 放宽到「分支里先 return，且 return 前不做调度」。
+  assert.match(keepAlive, /if \(!config\.offlineEnabled\) \{[^}]*setAccountRuntimeState\(key, 'offline'\);[^}]*return;/, '掉线重登依然受独立开关控制')
 })
 
 test('卡片改名并保留设计风格一致的标题与说明', () => {

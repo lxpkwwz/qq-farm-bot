@@ -326,15 +326,36 @@ function rejectAllQueuedRequests(reason: string): number {
     return entries.length;
 }
 
+/**
+ * 统一调用响应回调。
+ *
+ * 登录回包的 callback 是 async 函数，同步 try/catch 拦不住它的 Promise 拒绝；
+ * Node 20 把未处理拒绝当致命错误，会直接带走整个 worker 进程。所有调用点
+ * 都走这里，把「同步抛错」和「异步拒绝」一起收敛成一条告警。
+ */
+function invokePendingCallback(
+    callback: (err: Error | null, body?: Buffer, meta?: any) => void,
+    err: Error | null,
+    body?: Buffer,
+    meta?: any,
+): void {
+    try {
+        const result: any = callback(err, body, meta);
+        if (result && typeof result.then === 'function') {
+            Promise.resolve(result).catch((error: any) => {
+                logWarn('网络', `响应回调执行异常: ${String((error && error.message) || error)}`);
+            });
+        }
+    } catch (error: any) {
+        logWarn('网络', `响应回调执行异常: ${String((error && error.message) || error)}`);
+    }
+}
+
 function rejectAllPendingRequests(reason = '请求被中断'): number {
     const entries = Array.from(pendingCallbacks.entries());
     pendingCallbacks.clear();
     for (const [, pending] of entries) {
-        try {
-            pending.callback(new Error(reason));
-        } catch {
-            // ignore callback failure
-        }
+        invokePendingCallback(pending.callback, new Error(reason));
     }
     return entries.length;
 }
@@ -462,7 +483,7 @@ async function sendMsg(
     if (!isCurrentConnection(context) || context.socket.readyState !== WebSocket.OPEN) {
         if (pending) {
             pendingCallbacks.delete(seq);
-            pending.callback(new Error(`连接未打开：${methodName}`));
+            invokePendingCallback(pending.callback, new Error(`连接未打开：${methodName}`));
         }
         return false;
     }
@@ -471,7 +492,7 @@ async function sendMsg(
     } catch (err: any) {
         if (pending) {
             pendingCallbacks.delete(seq);
-            pending.callback(err);
+            invokePendingCallback(pending.callback, err);
         }
         return false;
     }
@@ -494,7 +515,12 @@ function sendMsgAsync(serviceName: string, methodName: string, bodyBytes: Buffer
     const options: SendMsgOptions = typeof timeoutOrOptions === 'number'
         ? { timeoutMs: timeoutOrOptions }
         : (timeoutOrOptions || {});
-    const timeoutMs = Math.max(1, Number(options.timeoutMs) || 20000);
+    // Infinity / NaN / 负数经 Math.max 会变成 0 或 1，下游 toDelayMs 再把非有限值
+    // 折成 0 → 请求刚入队就被判超时。只接受有限正数，其余回落到 20 秒。
+    const rawTimeoutMs = Number(options.timeoutMs);
+    const timeoutMs = Number.isFinite(rawTimeoutMs) && rawTimeoutMs > 0
+        ? Math.max(1, Math.floor(rawTimeoutMs))
+        : 20000;
     const expectedErrorCodes = new Set((options.expectedErrorCodes || []).map(Number).filter(Number.isFinite));
     const criticalLane: CriticalLane | undefined = options.criticalLane === 'heartbeat' || options.criticalLane === 'ace'
         ? options.criticalLane
@@ -668,7 +694,7 @@ function handleMessage(data: Buffer): void {
             if (pending) {
                 pendingCallbacks.delete(clientSeqVal);
                 if (errorCode !== 0) {
-                    pending.callback(new GatewayError(meta));
+                    invokePendingCallback(pending.callback, new GatewayError(meta));
                 } else {
                     if ((meta.service_name === 'gamepb.plantpb.PlantService' && meta.method_name !== 'AllLands')
                         || (meta.service_name === 'gamepb.itempb.ItemService' && meta.method_name === 'Use')) {
@@ -677,7 +703,7 @@ function handleMessage(data: Buffer): void {
                         // 避免 TTL 快照把「刚收完的地」又读成「还没收」。
                         networkEvents.emit('landsDirty', meta.method_name);
                     }
-                    pending.callback(null, msg.body, meta);
+                    invokePendingCallback(pending.callback, null, msg.body, meta);
                 }
                 
             }
@@ -1027,11 +1053,17 @@ async function sendLogin(context: ConnectionContext, onLoginSuccess?: () => void
         try {
             reply = (modern ? types.PlayerLoginReply : types.LoginReply).decode(bodyBytes!);
         } catch (e: any) {
-            log('登录', `解码失败: ${e.message}`);
+            // 畸形回包不会有第二次：只 return 会让连接停在 phase='login'，
+            // 干等 20 秒的 login_timeout 才断开。走正常断线收尾让主进程立即补 Code 重登。
+            logWarn('登录', `解码失败: ${e.message}`);
+            finalizeConnection(context, { source: 'login_failed', reason: `登录回包解码失败: ${e.message}` });
+            try { (context.socket as any).terminate(); } catch {}
             return;
         }
         if (!reply.basic) {
-            log('登录', '失败: 登录响应缺少账号信息');
+            logWarn('登录', '失败: 登录响应缺少账号信息');
+            finalizeConnection(context, { source: 'login_failed', reason: '登录响应缺少账号信息' });
+            try { (context.socket as any).terminate(); } catch {}
             return;
         }
 
@@ -1091,11 +1123,24 @@ async function sendLogin(context: ConnectionContext, onLoginSuccess?: () => void
             if (!isCurrentConnection(context)) return;
             if (modern) {
                 const sceneBody = types.PlayerSceneLoginRequest.encode({ global_scene_id: 1 }).finish();
-                const sceneResponse = await sendMsgAsync('gamepb.globalscenepb.GlobalSceneService', 'PlayerSceneLogin', sceneBody);
+                let sceneResponse: any;
+                try {
+                    sceneResponse = await sendMsgAsync('gamepb.globalscenepb.GlobalSceneService', 'PlayerSceneLogin', sceneBody);
+                } catch (e: any) {
+                    const message = String((e && e.message) || e);
+                    // 只有「请求超时」是可重试的瞬时故障：此时 phase 已 online、心跳与 ACE
+                    // 都已启动，掐掉这条健康连接会形成「登录成功→立即断开→重登」死循环。
+                    // 协议级错误（回包不完整 / 解码失败 / 连接被替换）仍交给外层 catch
+                    // 按登录失败收尾，不能让不完整场景数据带进农场自动化。
+                    if (!/超时|timeout|ETIMEDOUT/i.test(message)) throw e;
+                    logWarn('登录', `场景登录请求超时（不影响在线状态）: ${message}`);
+                }
                 if (!isCurrentConnection(context)) return;
-                const scene = types.PlayerSceneLoginReply.decode(sceneResponse.body);
-                if (scene.global_scene_id !== 1 || !scene.farm_scene_ext_data?.length) {
-                    throw new Error('农场场景登录回包不完整');
+                if (sceneResponse) {
+                    const scene = types.PlayerSceneLoginReply.decode(sceneResponse.body);
+                    if (scene.global_scene_id !== 1 || !scene.farm_scene_ext_data?.length) {
+                        throw new Error('农场场景登录回包不完整');
+                    }
                 }
             }
             if (onLoginSuccess) await onLoginSuccess();

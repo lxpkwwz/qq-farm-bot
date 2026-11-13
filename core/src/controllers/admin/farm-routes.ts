@@ -82,7 +82,12 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
 
         try {
             const type = String(req.body?.type || 'organic');
-            const count = Number(req.body?.count) || 0;
+            const rawCount = Number(req.body?.count ?? 0);
+            // `Number(x) || 0` 会原样放行 -5 / Infinity；负数直接进购买逻辑。
+            if (!Number.isFinite(rawCount) || rawCount < 0) {
+                return res.status(400).json({ ok: false, error: '无效的购买数量' });
+            }
+            const count = Math.trunc(rawCount);
             const bought = await ctx.provider.buyFertilizer(id, type, count);
             res.json({ ok: true, bought });
         } catch (e: any) {
@@ -100,10 +105,16 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
         try {
             const buyOrganic = req.body?.buyOrganic ?? false;
             const buyNormal = req.body?.buyNormal ?? false;
-            const organicCount = Number(req.body?.organicCount) || 0;
-            const organicThresholdHours = Number(req.body?.organicThresholdHours) || 0;
-            const normalCount = Number(req.body?.normalCount) || 0;
-            const normalThresholdHours = Number(req.body?.normalThresholdHours) || 0;
+            const amounts = {
+                organicCount: Number(req.body?.organicCount ?? 0),
+                organicThresholdHours: Number(req.body?.organicThresholdHours ?? 0),
+                normalCount: Number(req.body?.normalCount ?? 0),
+                normalThresholdHours: Number(req.body?.normalThresholdHours ?? 0),
+            };
+            if (Object.values(amounts).some(n => !Number.isFinite(n) || n < 0)) {
+                return res.status(400).json({ ok: false, error: '无效的化肥参数' });
+            }
+            const { organicCount, organicThresholdHours, normalCount, normalThresholdHours } = amounts;
 
             const result = await ctx.provider.checkAndBuyFertilizer(id, {
                 buyOrganic,
@@ -177,7 +188,11 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
             if (!accountId) return res.status(400).json({ ok: false, error: 'Missing accountId' });
 
             const seedId = Number((req.body || {}).seedId);
-            if (!seedId) return res.status(400).json({ ok: false, error: 'Missing seedId' });
+            // -1 / Infinity 是 truthy，会绕过 `!seedId`；下游 setPlantBlacklist 静默过滤，
+            // 路由仍回报 ok:true，前端以为已添加。
+            if (!Number.isInteger(seedId) || seedId <= 0) {
+                return res.status(400).json({ ok: false, error: '无效的 seedId' });
+            }
 
             const current = store.getPlantBlacklist ? store.getPlantBlacklist(accountId) : [];
 
@@ -205,7 +220,9 @@ function mountFarmRoutes(app: Application, ctx: AdminContext): void {
             if (!accountId) return res.status(400).json({ ok: false, error: 'Missing accountId' });
 
             const seedId = Number(req.params.seedId);
-            if (!seedId) return res.status(400).json({ ok: false, error: 'Missing seedId' });
+            if (!Number.isInteger(seedId) || seedId <= 0) {
+                return res.status(400).json({ ok: false, error: '无效的 seedId' });
+            }
 
             const current = store.getPlantBlacklist ? store.getPlantBlacklist(accountId) : [];
             const next = current.filter((id: number) => id !== seedId);

@@ -652,18 +652,28 @@ function refreshFarmCheckLoop(delayMs: number = 200): void {
 }
 
 // ============ 化肥自动购买定时检测 ============
+// 当前已生效的开关与间隔（用于判断配置下发后是否需要重建）。
+let fertilizerTimerSignature = '';
+
 function startFertilizerBuyCheckTimer(): void {
-    farmScheduler.clear('fertilizer_buy_check');
+    const buyOrganic: boolean = isAutomationOn('fertilizer_buy_organic');
+    const buyNormal: boolean = isAutomationOn('fertilizer_buy_normal');
 
     // 检查是否有开启的化肥购买功能
-    if (!isAutomationOn('fertilizer_buy_organic') && !isAutomationOn('fertilizer_buy_normal')) {
+    if (!buyOrganic && !buyNormal) {
+        if (fertilizerTimerSignature) stopFertilizerBuyCheckTimer();
         return;
     }
 
     // 设置定时检测
     const intervalMinutes: number = getFertilizerBuyCheckIntervalMinutes();
     const intervalMs: number = intervalMinutes * 60 * 1000;
+    const signature: string = `${buyOrganic ? 1 : 0}${buyNormal ? 1 : 0}|${intervalMinutes}`;
+    // 配置没变就不重建：重建会把计时重新起算，频繁保存设置会让巡检永远等不到触发。
+    if (signature === fertilizerTimerSignature && farmScheduler.has('fertilizer_buy_check')) return;
+    fertilizerTimerSignature = signature;
 
+    farmScheduler.clear('fertilizer_buy_check');
     farmScheduler.setIntervalTask('fertilizer_buy_check', intervalMs, () => {
         runExclusiveAutomationTask('fertilizer_buy_check', checkFertilizerBuyOnce).catch(() => null);
     });
@@ -677,6 +687,7 @@ function startFertilizerBuyCheckTimer(): void {
 }
 
 function stopFertilizerBuyCheckTimer(): void {
+    fertilizerTimerSignature = '';
     farmScheduler.clear('fertilizer_buy_check');
     log('农场', '化肥自动购买检测定时器已停止', {
         module: 'farm',

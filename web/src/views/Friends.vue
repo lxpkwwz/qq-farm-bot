@@ -269,6 +269,12 @@ watch(searchKeyword, () => {
   currentPage.value = 1
 })
 
+// 切号或好友同步后数量可能骤降，totalPages 缩了但 currentPage 还停在旧页，
+// slice 越界返回空数组，列表一片空白且没有「无数据」提示。
+watch(totalPages, (pages) => {
+  currentPage.value = Math.min(currentPage.value, pages)
+})
+
 const filteredInteractRecords = computed(() => {
   if (interactFilter.value === 'all')
     return interactRecords.value
@@ -491,6 +497,7 @@ watch(currentAccountId, () => {
   knownFriendSettingsLoadedAccount.value = ''
   friendStore.resetInteractionState()
   friendStore.resetFriendLandState()
+  currentPage.value = 1
 })
 watch(friendDataLoadScope, (scope) => {
   if (!scope) {

@@ -176,3 +176,24 @@ test('接线断言：保活只给自动路径记账，runtime-engine 注入账�
     assert.match(engine, /recordAutoRefreshFailure\(accountId, at\)/);
     assert.match(routes, /getPreflightStatsSnapshot\(\)/);
 });
+
+test('账本文件损坏时先留档再重建，不能用空表覆盖唯一副本', (t) => {
+    const os = require('node:os');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'farm-preflight-corrupt-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const filePath = path.join(dir, 'preflight-stats.json');
+    const original = '{ 这不是合法 JSON';
+    fs.writeFileSync(filePath, original, 'utf8');
+
+    const store = createPreflightStats({
+        filePath,
+        nowFn: () => NOW,
+        // 故意不注入 readJson：走默认的 strict 读取，模拟真实读盘路径
+        writeJson: () => {},
+    });
+    store.recordSuccess('acc-1', NOW);
+
+    const backups = fs.readdirSync(dir).filter(name => name.includes('.corrupt-'));
+    assert.equal(backups.length, 1, '损坏文件必须留档，否则后续 persist 会把唯一副本覆盖成空表');
+    assert.equal(fs.readFileSync(path.join(dir, backups[0]), 'utf8'), original, '留档内容必须是原文件');
+});

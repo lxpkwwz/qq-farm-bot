@@ -171,7 +171,14 @@ export function planNextSyncPacing(result: FriendPetSyncResult | null | undefine
     return { delayMs: SYNC_CHECK_INTERVAL_MS, quota: current.quota, rampLocked: current.rampLocked };
 }
 
-type ProbeOutcome = 'ok' | 'failed' | 'yield';
+/**
+ * 'invalid' 与 'failed' 必须分开：
+ * - invalid = 好友已失效/已被加黑（handleFriendEnterError 已处理），本轮就已了结，不必重试；
+ * - failed  = 超时/断连这类瞬时错误，好友本身没问题，当天还要补测。
+ * 原来两者都算 failed，而「当日完成」只看 deferred 不看 failed，一次瞬时错误就会
+ * markFullSyncDone，该好友当天再无护主犬结论 → 经验上限开启时整天不帮忙。
+ */
+type ProbeOutcome = 'ok' | 'invalid' | 'failed' | 'yield';
 
 async function probeFriendDog(gid: number, name: string): Promise<ProbeOutcome> {
     let entered: boolean = false;
@@ -185,11 +192,10 @@ async function probeFriendDog(gid: number, name: string): Promise<ProbeOutcome> 
         if (isGatewayYieldError(e)) return 'yield';
         // 复用已有的封禁加黑、失效好友清理逻辑
         const handled: { handled: boolean; kind: string } = visitStrategyRef().handleFriendEnterError(gid, name, e);
-        if (!handled.handled) {
-            logWarn('好友', `同步宠物时进入 ${name} 农场失败: ${e.message}`, {
-                module: 'friend', event: '好友宠物同步', result: 'error', friendName: name, friendGid: gid,
-            });
-        }
+        if (handled.handled) return 'invalid';
+        logWarn('好友', `同步宠物时进入 ${name} 农场失败: ${e.message}`, {
+            module: 'friend', event: '好友宠物同步', result: 'error', friendName: name, friendGid: gid,
+        });
         return 'failed';
     } finally {
         // Leave 必须配对送出：background 请求在网关忙的时候会被让路丢掉，留下「还在别人农场里」的
@@ -309,7 +315,9 @@ async function runFriendPetSyncRound(): Promise<FriendPetSyncResult> {
                     yielded = true;
                     break;
                 }
-                if (outcome === 'ok') checked += 1;
+                // 已失效/已加黑的好友本轮就有结论了，算「已处理」而不是「失败」，
+                // 否则这些好友会让整轮永远无法标记完成。
+                if (outcome === 'ok' || outcome === 'invalid') checked += 1;
                 else failed += 1;
                 await sleep(SYNC_GAP_MS);
             }
@@ -318,8 +326,10 @@ async function runFriendPetSyncRound(): Promise<FriendPetSyncResult> {
             if (index + SYNC_BATCH_SIZE < targets.length) await sleep(SYNC_BATCH_GAP_MS);
         }
 
-        // 只有真正跑完才标记当日完成，否则下一次定时检查继续补剩下的
-        if (deferred === 0) markFullSyncDone();
+        // 只有真正跑完才标记当日完成，否则下一次定时检查继续补剩下的。
+        // failed 必须一起判断：瞬时错误（超时/断连）没测到的好友，当天还要重试；
+        // 原来只看 deferred，最后一个好友探测失败时会被误判为「全部完成」。
+        if (deferred === 0 && failed === 0) markFullSyncDone();
 
         const stats: any = getFriendPetCacheStats();
         const deferNote: string = deferred > 0 ? `（让路原因：${describeDeferReason(deferReason)}）` : '';

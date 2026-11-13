@@ -52,7 +52,51 @@ function pskClientHello(ticket: Buffer, timestamp: number) {
     ]);
     return hs(0x01, body);
 }
-async function socket(host: string, port: number, timeout = 30000) { const s = net.createConnection({ host, port }); const chunks: Buffer[] = []; let ended = false; s.on('data', x => chunks.push(Buffer.from(x))); s.on('end', () => { ended = true; }); await new Promise<void>((ok, no) => { s.once('connect', ok); s.once('error', no); setTimeout(() => no(new Error('connection timeout')), timeout); }); let offset = 0; async function take() { const until = Date.now() + timeout; for (;;) { const all = Buffer.concat(chunks); if (all.length - offset >= 5) { const n = all.readUInt16BE(offset + 3); if (all.length - offset >= n + 5) { const out = { type: all[offset], body: all.subarray(offset + 5, offset + 5 + n) }; offset += 5 + n; return out; } } if (ended || Date.now() > until) throw new Error('socket read timeout'); await new Promise(r => setTimeout(r, 10)); } } return { s, take, send: (b: Buffer) => new Promise<void>((ok, no) => s.write(b, e => e ? no(e) : ok())), close: () => s.destroy() }; }
+async function socket(host: string, port: number, timeout = 30000) {
+    const s = net.createConnection({ host, port });
+    const chunks: Buffer[] = [];
+    let ended = false;
+    s.on('data', x => chunks.push(Buffer.from(x)));
+    s.on('end', () => { ended = true; });
+    // 连接超时定时器原来既不保存句柄也不清理：即使 100ms 就连上，30s 的活定时器
+    // 仍挂在 event loop 上拖住 worker 退出；连接失败时 socket 也没人关。
+    let connectTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+        await new Promise<void>((ok, no) => {
+            s.once('connect', ok);
+            s.once('error', no);
+            connectTimer = setTimeout(() => no(new Error('connection timeout')), timeout);
+        });
+    } catch (error) {
+        s.destroy();
+        throw error;
+    } finally {
+        if (connectTimer) clearTimeout(connectTimer);
+    }
+    let offset = 0;
+    async function take() {
+        const until = Date.now() + timeout;
+        for (;;) {
+            const all = Buffer.concat(chunks);
+            if (all.length - offset >= 5) {
+                const n = all.readUInt16BE(offset + 3);
+                if (all.length - offset >= n + 5) {
+                    const out = { type: all[offset], body: all.subarray(offset + 5, offset + 5 + n) };
+                    offset += 5 + n;
+                    return out;
+                }
+            }
+            if (ended || Date.now() > until) throw new Error('socket read timeout');
+            await new Promise(r => setTimeout(r, 10));
+        }
+    }
+    return {
+        s,
+        take,
+        send: (b: Buffer) => new Promise<void>((ok, no) => s.write(b, e => e ? no(e) : ok())),
+        close: () => s.destroy(),
+    };
+}
 function keys(secret: Buffer, label: string, hash: Buffer, size = 56) { const z = expand(secret, label, hash, size); return { ck: z.subarray(0, 16), sk: z.subarray(16, 32), ci: z.subarray(32, 44), si: z.subarray(44, 56) }; }
 function oneWayKeys(secret: Buffer, label: string, hash: Buffer) { const z = expand(secret, label, hash, 28); return { key: z.subarray(0, 16), iv: z.subarray(16, 28) }; }
 function manualRequest(buffer: string, app: Buffer) { const raw = Buffer.from(buffer, 'base64'); const f = pbf(raw); const ticket = f.get(1); const device = f.get(2); const host = f.get(3); if (!Buffer.isBuffer(ticket) || !ticket.length || !Buffer.isBuffer(device) || !device.length) throw new Error('invalid login buffer'); const base = Buffer.concat([pbl(1, app), pbv(2, 1901)]); const req = Buffer.concat([pbl(1, base), pbl(3, pbl(1, ticket)), pbv(4, 4), pbl(6, Buffer.alloc(0)), pbv(7, 0), pbv(8, 6)]); return { req, device, host: Buffer.isBuffer(host) && host.length ? host : HOST_APP }; }
@@ -151,9 +195,22 @@ async function requestCodeOnSession(session: Session, appId: string, target: Tar
     const c = await socket(target.host, target.port, 8000);
     const chunks: Buffer[] = [];
     c.s.on('data', chunk => chunks.push(Buffer.from(chunk)));
-    await c.send(Buffer.concat([U8(requestHead), body]));
-    await new Promise<void>(resolve => { c.s.on('end', resolve); setTimeout(resolve, 8000); });
-    c.close();
+    try {
+        await c.send(Buffer.concat([U8(requestHead), body]));
+        // 8 秒兜底定时器原来从不清理；c.send 失败时 c.close() 也被整段跳过，
+        // 泄漏一条 TCP 连接。两条都收进 finally。
+        let waitTimer: ReturnType<typeof setTimeout> | undefined;
+        try {
+            await new Promise<void>((resolve) => {
+                c.s.once('end', resolve);
+                waitTimer = setTimeout(resolve, 8000);
+            });
+        } finally {
+            if (waitTimer) clearTimeout(waitTimer);
+        }
+    } finally {
+        c.close();
+    }
     const raw = Buffer.concat(chunks);
     const headerEnd = raw.indexOf('\r\n\r\n');
     if (headerEnd < 0) throw new Error('ShortLink returned an invalid HTTP response');
@@ -208,8 +265,9 @@ async function establishSession(loginBuffer: string): Promise<Session> {
     const { req, device, host } = manualRequest(loginBuffer, crypto.randomBytes(32));
     const failures: string[] = [];
     for (const target of (await resolveTargets('long')).slice(0, 8)) {
+        let c: any = null;
         try {
-            const c = await socket(target.host, target.port);
+            c = await socket(target.host, target.port);
             const a = ecdh(); const b = ecdh(); const hello = ch(a.pub, b.pub);
             await c.send(rec(0x16, hello));
             const sh = await c.take();
@@ -243,11 +301,16 @@ async function establishSession(loginBuffer: string): Promise<Session> {
                     const tickets = certHash ? ticketEntries.filter(entry => entry[0] === 1).map(ticket => ({ psk: expand(secret, 'PSK_ACCESS', certHash!, 32), ticket })) : [];
                     if (!s.sendKey || !s.recvKey || !s.uin || !tickets.length) throw new Error('ManualAuth did not return a usable session');
                     const established: Session = { ...s, deviceId: device, hostAppId: host, ...tickets[0] };
-                    c.close();
                     return established;
                 }
             }
-        } catch (error: any) { failures.push(`${target.host}:${target.port} ${String((error && error.message) || error).slice(0, 120)}`); }
+        } catch (error: any) {
+            failures.push(`${target.host}:${target.port} ${String((error && error.message) || error).slice(0, 120)}`);
+        } finally {
+            // 握手中间任一步失败时，原来 try 内局部的 c 没有人关；最多 8 个接入点
+            // 逐个重试会泄漏 8 条 TCP 连接及其 data/end 监听器。
+            if (c) c.close();
+        }
     }
     throw new Error(`Unable to establish WeChat protocol session: ${failures.join('; ') || 'no HTTPDNS target succeeded'}`);
 }

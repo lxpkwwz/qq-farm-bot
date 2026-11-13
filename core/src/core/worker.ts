@@ -8,7 +8,7 @@ const { CONFIG, updateRuntimeConfig } = require('../config/config');
 const { getLevelExpProgress, loadConfigs } = require('../config/gameConfig');
 const { getAutomation, getPreferredSeed, getConfigSnapshot, applyConfigSnapshot } = require('../models/store');
 const { checkAndClaimEmails, configureEmailClaim, getEmailDailyState } = require('../services/email');
-const { checkFarm, startFarmCheckLoop, stopFarmCheckLoop, refreshFarmCheckLoop, getOwnFarmMaturityDelayMs, consumeFarmWakeup, getLandsDetail, getAvailableSeeds, purchaseSeed, runFarmOperation, runFertilizerByConfig, fertilizeOwnLand } = require('../services/farm');
+const { checkFarm, startFarmCheckLoop, stopFarmCheckLoop, refreshFarmCheckLoop, startFertilizerBuyCheckTimer, getOwnFarmMaturityDelayMs, consumeFarmWakeup, getLandsDetail, getAvailableSeeds, purchaseSeed, runFarmOperation, runFertilizerByConfig, fertilizeOwnLand } = require('../services/farm');
 const { checkFriends, startFriendCheckLoop, stopFriendCheckLoop, refreshFriendCheckLoop, getFriendsList, getFriendsListCacheOnly, getFriendLandsDetail, doFriendOperation, deleteFriend, runScheduledStealCheck, runGoldenBugPlacement } = require('../services/friend');
 const { getInteractRecords } = require('../services/interact');
 const { processInviteCodes } = require('../services/invite');
@@ -61,6 +61,33 @@ function sendToMaster(payload: Record<string, any>): void {
     }
     if (parentPort) {
         parentPort.postMessage(payload);
+    }
+}
+
+/**
+ * 回送面板 API 结果。
+ *
+ * result 里混入 BigInt / 循环引用时 `process.send` 会同步抛 TypeError；worker 正在
+ * 退出、IPC 已关闭时也会抛。原实现把这一句放在 try/catch 之外，异常直接变成
+ * handleApiCall 的 Promise 拒绝 → Node 20 fatal，且主进程永远收不到回包。
+ */
+function sendApiResponse(id: any, result: any, error: any): void {
+    try {
+        sendToMaster({ type: 'api_response', id, result, error });
+    } catch (e: any) {
+        try {
+            sendToMaster({
+                type: 'api_response',
+                id,
+                result: null,
+                error: {
+                    message: `回包发送失败: ${String((e && e.message) || e)}`,
+                    name: 'WorkerApiResponseError',
+                },
+            });
+        } catch {
+            // IPC 已彻底关闭，主进程侧的调用定时器会兜底。
+        }
     }
 }
 
@@ -583,6 +610,10 @@ function stopMysteryShopTimer(): void {
 /** 活动自动化：与农场主循环同进程，按 automation 开关逐项执行活动领取。 */
 function startActivityAutomationTimer(): void {
     if (!loginReady) return;
+    // 开启状态每轮由 getAutomationSnapshot() 现读，所以配置下发时无需重建；
+    // 而重建会把 5 分钟周期清零——面板上频繁保存设置时，活动自动化会被无限推后。
+    // 保存后立即生效由 scheduleActivityAutomationAfterSave 的 2 秒补跑负责。
+    if (workerScheduler.has('activity_automation_interval')) return;
     const { startActivityAutomation } = require('../services/activity-automation');
     startActivityAutomation(workerScheduler);
 }
@@ -661,8 +692,14 @@ function startMysteryShopTimer(): void {
         isMysteryShopWatchEnabled,
         AUTO_BUY_CHECK_INTERVAL_MS,
     } = require('../services/mystery-shop-auto');
+    if (!loginReady || !isMysteryShopWatchEnabled(getAutomation())) {
+        stopMysteryShopTimer();
+        return;
+    }
+    // 巡查间隔没有变化时不要重建：setIntervalTask 会先 clear 再注册，
+    // 每保存一次设置就把下一次巡查推后一整个周期（默认 10 分钟）。
+    if (workerScheduler.has('mystery_shop_interval')) return;
     stopMysteryShopTimer();
-    if (!loginReady || !isMysteryShopWatchEnabled(getAutomation())) return;
     // 对齐老版 mystery_shop_auto_buy_initial：登录后 10 秒先探一次（商人可能在登录后任意时间出现）。
     workerScheduler.setTimeoutTask('mystery_shop_initial', 10 * 1000, () => {
         runExclusiveAutomationTask('mystery_shop', runMysteryShopTick).catch(() => null);
@@ -758,6 +795,11 @@ function applyRuntimeConfig(snapshot: any, syncNow: boolean = false): number {
             startMysteryShopTimer();
             startActivityAutomationTimer();
             startPetFeedCheckTimer();
+            // 化肥自动购买检测：原来只在 startFarmCheckLoop（登录/启动）建一次，
+            // 而两个开关默认都是关的，登录时定时器根本不会建；之后在面板打开开关
+            // 也不会再调用，功能永远不启动，间隔改了也不生效。这里随配置下发重建
+            // （内部按「开关 + 间隔」签名去重，配置没变不会重置计时）。
+            startFertilizerBuyCheckTimer();
 
             // 对齐老版 mystery_shop_auto_buy_after_save：神秘商人相关开关变化且巡查已启用时，
             // 保存后 2 秒立即巡查一次，不用等下一个 10 分钟周期。
@@ -812,11 +854,27 @@ function applyRuntimeConfig(snapshot: any, syncNow: boolean = false): number {
 onMasterMessage(async (msg: any) => {
     try {
         if (msg.type === 'start') {
-            await startBot(msg.config);
+            try {
+                await startBot(msg.config);
+            } catch (startError: any) {
+                // startBot 一进来就把 isRunning 置 true；初始化阶段（config 缺字段 /
+                // loadProto 失败 / connect 因空 Code 抛错）失败时不回滚，之后所有 start
+                // 消息都会被 `if (isRunning) return` 静默吞掉，账号再也起不来。
+                isRunning = false;
+                shutdownStarted = false;
+                throw startError;
+            }
         } else if (msg.type === 'stop') {
             await stopBot();
         } else if (msg.type === 'api_call') {
-            handleApiCall(msg);
+            // fire-and-forget 的 async 函数一旦拒绝就是 Node 20 的致命错误，
+            // 外层同步 try/catch 完全拦不住，必须显式挂 catch。
+            void handleApiCall(msg).catch((error: any) => {
+                sendApiResponse(msg.id, null, {
+                    message: String((error && error.message) || error || 'Worker API error'),
+                    name: String((error && error.name) || 'Error'),
+                });
+            });
         } else if (msg.type === 'config_sync') {
             applyRuntimeConfig(msg.config || {}, true);
         } else if (msg.type === 'reload_config') {
@@ -981,12 +1039,14 @@ async function startBot(config: any): Promise<void> {
         const latest = getUserState();
         const accountId = process.env.FARM_ACCOUNT_ID || '';
         try {
+            // 传原始值而不是 Number(x || 0)：登录回包缺字段时 0 是「假基线」，
+            // 会把整个账户余额算成今日净增。未知就让 stats 留 null，等首次有效观测起算。
             initStatsWithPersistence(
                 accountId,
-                Number(latest.gold || 0),
-                Number(latest.exp || 0),
-                Number(latest.coupon || 0),
-                goldBeanReady ? Number(latest.goldBean || 0) : null,
+                latest.gold ?? null,
+                latest.exp ?? null,
+                latest.coupon ?? null,
+                goldBeanReady ? (latest.goldBean ?? 0) : null,
             );
             resetSessionGains();
         } catch (e: any) {
@@ -1518,7 +1578,7 @@ async function handleApiCall(msg: any): Promise<void> {
         };
     }
 
-    sendToMaster({ type: 'api_response', id, result, error });
+    sendApiResponse(id, result, error);
 }
 
 async function getDailyGiftOverview(propagateErrors: boolean = false): Promise<any> {
