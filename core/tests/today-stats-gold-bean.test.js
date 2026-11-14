@@ -10,19 +10,46 @@ const statsSource = path.resolve(__dirname, '../src/services/stats.ts');
 const runtimeSource = path.resolve(__dirname, '../src/runtime/runtime-state.ts');
 
 // 每个用例一份独立的 stats 模块实例 + 独立数据目录，避免模块级状态互相污染。
+//
+// 数据目录通过「临时替换 runtime-paths 的导出」来指定：stats 已经统一走
+// runtime-paths 取路径，不再认 FARM_DATA_DIR（那个 env 只有 stats 认、其它模块
+// 不认，本身就是个陷阱）。stats.js 在模块顶层就把 getDataDir 解构下来了，
+// 所以 VM 跑完即可把 require.cache 还原，不会影响后续用例。
 function loadStats(dataDir) {
     const actualRequire = require('node:module').createRequire(statsFile);
+    const runtimePath = require.resolve('../dist/config/runtime-paths');
+    const previous = require.cache[runtimePath];
+    const realRuntime = require(runtimePath);
+    require.cache[runtimePath] = {
+        id: runtimePath,
+        filename: runtimePath,
+        loaded: true,
+        exports: {
+            ...realRuntime,
+            getDataDir: () => dataDir,
+            getDataFile: filename => path.join(dataDir, filename),
+            ensureDataDir: () => {
+                fs.mkdirSync(dataDir, { recursive: true });
+                return dataDir;
+            },
+        },
+    };
     const box = { exports: {} };
-    vm.runInNewContext(fs.readFileSync(statsFile, 'utf8'), {
-        module: box,
-        exports: box.exports,
-        require: actualRequire,
-        Date,
-        setTimeout,
-        clearTimeout,
-        process: { env: { FARM_DATA_DIR: dataDir }, pid: 12345, uptime: () => 90000 },
-        console: { warn: () => {}, log: () => {} },
-    });
+    try {
+        vm.runInNewContext(fs.readFileSync(statsFile, 'utf8'), {
+            module: box,
+            exports: box.exports,
+            require: actualRequire,
+            Date,
+            setTimeout,
+            clearTimeout,
+            process: { env: {}, pid: 12345, uptime: () => 90000 },
+            console: { warn: () => {}, log: () => {} },
+        });
+    } finally {
+        if (previous) require.cache[runtimePath] = previous;
+        else delete require.cache[runtimePath];
+    }
     return box.exports;
 }
 

@@ -1,12 +1,44 @@
 {
   "major": 3,
   "minor": 25,
-  "patch": 10,
-  "build": 179,
-  "version": "3.25.10",
-  "updatedAt": "2026-11-13T23:15:23.885Z",
+  "patch": 15,
+  "build": 183,
+  "version": "3.25.15",
+  "updatedAt": "2026-11-14T03:32:49.515Z",
   "lastCommit": "—",
   "history": [
+    {
+      "version": "3.25.15",
+      "build": 183,
+      "date": "2026-11-14",
+      "summary": "调整账号卡片「上次自动续期」：整行跟随最近一次结果，成功绿失败红且只显示一个计数",
+      "commit": "—",
+      "type": "patch"
+    },
+    {
+      "version": "3.25.13",
+      "build": 182,
+      "date": "2026-11-14",
+      "summary": "修复自动出售全军覆没：背包回包的 Long 对象被输入守卫判成 0，并让汇总日志不再谎报成功",
+      "commit": "—",
+      "type": "patch"
+    },
+    {
+      "version": "3.25.12",
+      "build": 181,
+      "date": "2026-11-14",
+      "summary": "补齐前后端接口契约对账闸门，115 个前端路径与 134 个调用全部对齐",
+      "commit": "—",
+      "type": "patch"
+    },
+    {
+      "version": "3.25.11",
+      "build": 180,
+      "date": "2026-11-14",
+      "summary": "修复删号后旧账号缓存被新号继承，并让当日统计走统一数据目录",
+      "commit": "—",
+      "type": "patch"
+    },
     {
       "version": "3.25.10",
       "build": 179,

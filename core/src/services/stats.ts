@@ -2,10 +2,17 @@ export {};
 const path = require('node:path');
 const fs = require('node:fs');
 const { getSystemDateKey } = require('../utils/utils');
+const { getDataDir } = require('../config/runtime-paths');
 const { renameWithRetry } = require('./json-db');
+
 function getStatsFilePath(accountId: string): string {
-    const dataDir: string = process.env.FARM_DATA_DIR || path.join(__dirname, '../../data');
-    return path.join(dataDir, 'stats', `${accountId}.json`);
+    // 必须和其它数据文件走同一个来源（runtime-paths）。原来这里用
+    // `path.join(__dirname, '../../data')` 硬拼，绕过了数据目录抽象：
+    //   1. 测试/冒烟脚本把数据目录重定向到临时目录时，统计仍然写进真实 core/data；
+    //   2. 打包成单文件后 __dirname 在虚拟快照里，路径同样不对。
+    // 文件名顺带做一次 id 归一化，避免手改 accounts.json 塞进来的怪 id 越界写盘。
+    const safeId: string = String(accountId || '').replace(/[^\w-]/g, '_');
+    return path.join(getDataDir(), 'stats', `${safeId}.json`);
 }
 
 function getTodayKey(): string {

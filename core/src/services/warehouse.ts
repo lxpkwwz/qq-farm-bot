@@ -71,16 +71,46 @@ function toSellItem(item: any): any {
     return payload;
 }
 
+/**
+ * 归一化的目标是「产出 number」：toNum 只认 Long→number，纯整数文本会被原样
+ * 返回成字符串，于是 findBagItem 里 `toNum('40004') === 40004` 的严格比较会失败。
+ * 非法文本（NaN / Infinity）与其它垃圾形态原样交给后面的 read* 守卫统一拦下。
+ */
+function normalizeItemNumber(value: unknown): number {
+    if (typeof value === 'string') return Number(value);
+    return toNum(value as any);
+}
+
+/**
+ * 出售条目在进入 read* 守卫之前的数值归一化（整个 sellItems 只做这一次）。
+ *
+ * 两条调用路径的字段形态不同：
+ *   - 自动出售 sellAllFruits：直接拿背包回包的 item，int64 解码为 protobuf Long 对象；
+ *   - 手动出售 /api/bag/sell：经 JSON 传入，是 number 或纯数字文本。
+ *
+ * read* 守卫只接受 number / 纯整数文本，直接喂 Long 会把合法的 id/count 判成 0，
+ * 于是整批物品被报成「出售物品参数无效」并逐个跳过 —— 自动出售会静默全军覆没。
+ * toNum 不拦 Infinity，越界值仍由后面的 read* 兜住。
+ */
+function normalizeSellItemInput(item: any): any {
+    return {
+        ...item,
+        id: normalizeItemNumber(item && item.id),
+        count: normalizeItemNumber(item && item.count),
+        uid: normalizeItemNumber(item && item.uid),
+    };
+}
+
 async function sellItems(items: any[]): Promise<any> {
-    const requested: any[] = Array.isArray(items) ? items : [];
+    // 内部回包（Long 对象）与外部输入（number / 数字文本）先归一成同一形态，
+    // 后面的守卫、背包匹配、payload 编码才不会各按各的理解取值。
+    const requested: any[] = (Array.isArray(items) ? items : []).map(normalizeSellItemInput);
     if (requested.length === 0) throw new Error('没有可出售的物品');
     const baseContext: SellConditionContext = await getSellConditionContext();
     const bagItems: any[] = getBagItems(await getBag());
     for (const item of requested) {
-        // `toNum` 不拦 Infinity（`Infinity || 0` 仍是 Infinity），会让后面的 `<= 0` 检查失效，
-        // 只会在「背包中未找到物品Infinity」这种文案上暴露出来。
-        const id: number = readIdOr(item && item.id, 'id', 0);
-        const count: number = readCountOr(item && item.count, 0, 'count', MAX_SELL_COUNT, 1);
+        const id: number = readIdOr(item.id, 'id', 0);
+        const count: number = readCountOr(item.count, 0, 'count', MAX_SELL_COUNT, 1);
         if (id <= 0 || count <= 0) throw new Error('出售物品参数无效');
         const info: any = getItemById(id);
         const bagItem: any | null = findBagItem(bagItems, item);
@@ -670,6 +700,10 @@ async function getBagDetail(): Promise<any> {
 
 // ============ 出售逻辑 ============
 
+function sellItemLabel(item: any): string {
+    return `${getFruitName(toNum(item && item.id))}x${toNum(item && item.count)}`;
+}
+
 /**
  * 检查并出售所有果实
  */
@@ -684,7 +718,6 @@ async function sellAllFruits(): Promise<void> {
         const baseContext: SellConditionContext = await getSellConditionContext();
 
         const toSell: any[] = [];
-        const names: string[] = [];
         for (const item of items) {
             const id: number = toNum(item.id);
             const count: number = toNum(item.count);
@@ -693,7 +726,6 @@ async function sellAllFruits(): Promise<void> {
                 && !isItemLocked(item)
                 && getEffectiveSellInfo(id, { ...baseContext, expireTime }).sellable) {
                 toSell.push(item);
-                names.push(`${getFruitName(id)}x${count}`);
             }
         }
 
@@ -709,6 +741,9 @@ async function sellAllFruits(): Promise<void> {
         // 老版口径：出售次数按实际卖出的果实数量累计（跳过的不可售条目不计入）。
         let soldTotalCount: number = 0;
         let skippedTotalCount: number = 0;
+        // 汇总日志只列实际卖出的条目：以前把待售清单（names）整份打印，
+        // 即使全部失败也显示「出售 玉米x17,...」，看起来像成功了。
+        const soldNames: string[] = [];
         for (let i = 0; i < toSell.length; i += SELL_BATCH_SIZE) {
             const batch: any[] = toSell.slice(i, i + SELL_BATCH_SIZE);
             try {
@@ -718,6 +753,7 @@ async function sellAllFruits(): Promise<void> {
                 knownGold = inferred.nextKnownGold;
                 if (gained > 0) serverGoldTotal += gained;
                 soldTotalCount += batch.reduce((sum, it) => sum + toNum(it.count), 0);
+                soldNames.push(...batch.map(sellItemLabel));
             } catch (batchErr: any) {
                 // 某个条目可能参数非法，降级为逐个出售，跳过错误条目
                 logWarn('仓库', `批量出售失败，改为逐个重试: ${batchErr.message}`);
@@ -729,6 +765,7 @@ async function sellAllFruits(): Promise<void> {
                         knownGold = inferred.nextKnownGold;
                         if (gained > 0) serverGoldTotal += gained;
                         soldTotalCount += toNum(it.count);
+                        soldNames.push(sellItemLabel(it));
                     } catch (singleErr: any) {
                         const sid: number = toNum(it.id);
                         const sc: number = toNum(it.count);
@@ -780,10 +817,14 @@ async function sellAllFruits(): Promise<void> {
                 updateStatusGold(state.gold);
             }
         }
-        log('仓库', `出售 ${names.join(', ')}${totalGoldEarned > 0 ? `，获得 ${totalGoldEarned} 金币` : ''}`, {
+        const soldNothing: boolean = soldTotalCount <= 0;
+        const sellSummary: string = soldNothing
+            ? `出售未完成：${toSell.length} 项全部跳过，请查看上方「跳过不可售物品」告警${skippedTotalCount > 0 ? `（累计 ${skippedTotalCount} 个）` : ''}`
+            : `出售 ${soldNames.join(', ')}${skippedTotalCount > 0 ? `（跳过 ${skippedTotalCount} 个）` : ''}${totalGoldEarned > 0 ? `，获得 ${totalGoldEarned} 金币` : ''}`;
+        log('仓库', sellSummary, {
             module: 'warehouse',
             event: totalGoldEarned > 0 ? 'sell_success' : 'sell_done',
-            result: totalGoldEarned > 0 ? 'ok' : 'unknown_gain',
+            result: soldNothing ? 'all_skipped' : (totalGoldEarned > 0 ? 'ok' : 'unknown_gain'),
             count: toSell.length,
             soldCount: Math.max(0, soldTotalCount),
             skippedCount: skippedTotalCount,
@@ -833,6 +874,7 @@ async function getBagSeeds(): Promise<any[]> {
 }
 
 module.exports = {
+    normalizeSellItemInput,
     getBag,
     getBagDetail,
     sellItems,

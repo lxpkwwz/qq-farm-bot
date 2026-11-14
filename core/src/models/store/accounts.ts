@@ -181,6 +181,7 @@ function addOrUpdateAccount(acc: Partial<Account> & { avatarUrl?: string; openid
 
 function deleteAccount(id: unknown): AccountsData {
     const { removeAccountConfig } = require('./account-config');
+    const { purgeAccountArtifacts } = require('./account-artifacts');
     const data = getAccounts();
     data.accounts = data.accounts.filter(a => a.id !== String(id));
     if (data.accounts.length === 0) {
@@ -188,6 +189,10 @@ function deleteAccount(id: unknown): AccountsData {
     }
     saveAccounts(data);
     removeAccountConfig(id);
+    // 账号 id 会被复用（账号清空后 nextId 回到 1），所以属于这个 id 的
+    // 好友 GID 缓存 / 当日统计 / 好友宠物缓存必须一起清掉，否则新账号
+    // 会直接继承上一个账号的数据。
+    purgeAccountArtifacts(id);
     return data;
 }
 

@@ -329,8 +329,15 @@ test('本轮修掉的四个漏洞各自钉一条断言', () => {
 
     // 4. 背包使用 / 出售的 itemId 与数量。
     assert.match(worker, /const itemId = readId\(args\[0\], 'itemId'\)/);
-    assert.match(warehouse, /readIdOr\(item && item\.id, 'id', 0\)/);
-    assert.match(warehouse, /readCountOr\(item && item\.count, 0, 'count'/);
+    // 出售条目的字段来自两条路径：内部背包回包（protobuf int64 → Long 对象）与
+    // 外部 JSON（number / 纯整数文本）。read* 只认 number / 文本，所以必须先
+    // normalizeSellItemInput 归一成 number，再把归一化结果交给 read*。
+    // 直接把回包字段喂给 read* 会把合法 Long 判成 0 → 自动出售静默全军覆没。
+    assert.match(warehouse, /\(Array\.isArray\(items\) \? items : \[\]\)\.map\(normalizeSellItemInput\)/);
+    assert.match(warehouse, /readIdOr\(item\.id, 'id', 0\)/);
+    assert.match(warehouse, /readCountOr\(item\.count, 0, 'count'/);
+    assert.doesNotMatch(warehouse, /readIdOr\(item && item\.id/);
+    assert.doesNotMatch(warehouse, /readCountOr\(item && item\.count/);
 });
 
 test('toNum 仍然只用于把 Long 转成 number，不承担校验职责', () => {

@@ -35,7 +35,7 @@ export interface WxPreflightStats {
 }
 
 export interface WxPreflightSummary {
-  /** 手机端与 PC 端共用的完整文案：上次续期 + 今日成功 + 今日失败。 */
+  /** 手机端与 PC 端共用的完整文案：上次续期时间 + 最近一次结果对应的今日计数（只显示一个）。 */
   text: string
   color: string
   hint: string
@@ -62,9 +62,6 @@ export function getWxPreflightBadge(acc: any): WxPreflightBadge | null {
   return { text: '未知', hint: '更新服务后可查看', badgeClass: BADGE_UNKNOWN }
 }
 
-/** 凭证约 2 小时到期、到期前 45 分钟续期，超过 3 小时没有成功记录就值得提醒。 */
-const PREFLIGHT_STALE_MS = 3 * 3600_000
-
 /** 毫秒时间戳（兼容老数据可能写成的秒级），无效值返回 0。 */
 function normalizeTimestamp(value: unknown): number {
   const n = Number(value)
@@ -85,13 +82,17 @@ function formatAgo(ts: number, now: number): string {
 }
 
 /**
- * 账号卡片「上次自动续期 · 今日成功 N 次 · 今日失败 M 次」。
+ * 账号卡片「上次自动续期 · 今日成功 N 次」或「上次自动续期 · 今日失败 M 次」。
  *
- * 手机端与 PC 端显示同一份文案——成功次数同样说明「后端真的在续」，不能只给
- * PC 看，否则手机上看不出续期有没有生效。
+ * 整行（时间、只显示哪一侧计数、颜色）统一以「最近一次自动续期结果」为准：
+ *   - 最近一次是失败 → 时间取 lastFailureAt、只显示今日失败次数、整行红色；
+ *   - 最近一次是成功 → 时间取 lastSuccessAt、只显示今日成功次数、整行绿色。
+ * 这样「今日失败过但后来恢复」的账号不会被一直染红，也不会同时出现两个互相
+ * 打架的计数。没有任何记录时显示灰色「暂无记录」，不编造时间。
  * 数据来自后端持久化的自动续期账本（preflight-stats.json），字段缺失说明服务
  * 还是旧版本，返回 null 不渲染，避免把「还没更新」误报成「没在续期」。
- * 只统计后端自动发起的到期前续期与掉线重登，手动点按钮不计入。
+ * 手机端与 PC 端共用同一份文案；只统计后端自动发起的到期前续期与掉线重登，
+ * 手动点按钮不计入。
  */
 export function getWxPreflightSummary(acc: any, now: number = Date.now()): WxPreflightSummary | null {
   if (String(acc?.platform || '') !== 'wx')
@@ -112,27 +113,26 @@ export function getWxPreflightSummary(acc: any, now: number = Date.now()): WxPre
   const lastFailureAt = normalizeTimestamp(stats.lastFailureAt)
   const successesToday = Math.max(0, Number(stats.successesToday) || 0)
   const failuresToday = Math.max(0, Number(stats.failuresToday) || 0)
+
+  // 最近一次是谁，整行就跟着谁：时间 / 只显示哪一侧计数 / 颜色。
+  const lastFailed = lastFailureAt > 0 && lastFailureAt > lastSuccessAt
+  const lastAt = lastFailed ? lastFailureAt : lastSuccessAt
+  const hasRecord = lastAt > 0
+
   const hintBase = '只统计后端自动发起的到期前续期与掉线重登，手动续期不计入；按北京时间自然日计数，容器重启不丢失。'
-  const hint = lastSuccessAt
-    ? `${hintBase} 最近一次成功：${new Date(lastSuccessAt).toLocaleString('zh-CN', { hour12: false })}`
+  const hint = hasRecord
+    ? `${hintBase} 最近一次${lastFailed ? '失败' : '成功'}：${new Date(lastAt).toLocaleString('zh-CN', { hour12: false })}`
     : hintBase
 
-  const successText = `今日成功 ${successesToday} 次`
-  if (!lastSuccessAt) {
-    return {
-      text: `上次自动续期：暂无记录 · ${successText} · 今日失败 ${failuresToday} 次`,
-      color: failuresToday > 0 ? COLOR_RED : COLOR_GRAY,
-      hint,
-    }
-  }
-
-  const when = formatAgo(lastSuccessAt, now)
-  const text = `上次自动续期：${when} · ${successText} · 今日失败 ${failuresToday} 次`
-  const color = failuresToday > 0 && lastFailureAt > lastSuccessAt
-    ? COLOR_RED
-    : failuresToday > 0 || now - lastSuccessAt > PREFLIGHT_STALE_MS
-      ? COLOR_AMBER
-      : COLOR_GREEN
+  // 两个计数只显示一个，且与颜色同源：最近一次失败只显示失败，成功只显示成功。
+  const countText = lastFailed
+    ? `今日失败 ${failuresToday} 次`
+    : `今日成功 ${successesToday} 次`
+  const when = hasRecord ? formatAgo(lastAt, now) : '暂无记录'
+  const text = `上次自动续期：${when} · ${countText}`
+  let color = COLOR_GRAY
+  if (hasRecord)
+    color = lastFailed ? COLOR_RED : COLOR_GREEN
   return { text, color, hint }
 }
 
