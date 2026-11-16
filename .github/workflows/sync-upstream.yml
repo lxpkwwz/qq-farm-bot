@@ -1,10 +1,8 @@
 name: Sync upstream
 
-# 每 6 小时把上游 602832789/qq-farm-bot 的 main 合并到本 fork。
-# cron 使用 UTC：0 */6 * * * 对应北京时间 02:00 / 08:00 / 14:00 / 20:00。
+# 自动同步已暂停：原上游 602832789/qq-farm-bot 已被删除，定时任务只会每 6 小时失败一次。
+# 需要恢复时，把上游地址换成有效仓库并重新加回 schedule。
 on:
-  schedule:
-    - cron: '0 */6 * * *'
   workflow_dispatch:
 
 permissions:
